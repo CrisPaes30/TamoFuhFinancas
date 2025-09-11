@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "types": ["vite/client"]
+  },
+  "include": ["vite.config.ts"]
+}
