@@ -10,8 +10,11 @@
   },
   "dependencies": {
     "dexie": "^4.0.7",
+    "firebase": "^12.2.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "shallow": "^1.0.0",
+    "zustand": "^5.0.8"
   },
   "devDependencies": {
     "@types/react": "^18.3.5",

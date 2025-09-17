@@ -1,4 +1,5 @@
 // src/insights.ts
+import { toMonth, toMillis, toYMD } from "@/lib/dateFmt";
 export type Expense = {
     id: string;
     title: string;
@@ -36,7 +37,7 @@ export type Expense = {
   export function sliceByMonth(expenses: Expense[], incomes: Income[], ym: string): MonthSlice {
     return {
       ym,
-      expenses: expenses.filter(e => !e.deleted && (e.date||"").startsWith(ym)),
+      expenses: expenses.filter(e => !e.deleted && (toMonth(e.date)||"").startsWith(ym)),
       incomes: incomes.filter(i => i.month === ym),
     };
   }
