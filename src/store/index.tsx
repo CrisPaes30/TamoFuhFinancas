@@ -162,26 +162,34 @@ export const useStore = create<Store>()(
         if (changedCouple || needAttach) {
           const cid = p.coupleId!;
 
+          // 🔧 self-heal: garante que o usuário atual está em couples/{cid}.members
+          // (ignora erro se regras bloquearem; nesse caso, faça inclusão via console)
+          get().joinCouple(cid).catch(() => {});
+
           // Couple
           const cRef = doc(db, "couples", cid);
-          unsubCouple = onSnapshot(cRef, (snap) => {
-            if (!snap.exists()) {
-              if (get().couple !== null) set({ couple: null, expenses: [], incomes: [] });
-              return;
-            }
-            const data = snap.data() as any;
-            const next: Couple = {
-              id: cid,
-              nameA: data?.nameA ?? null,
-              nameB: data?.nameB ?? null,
-              currency: (data?.currency ?? null) as any,
-              createdAt: (data?.createdAt ?? null) as Timestamp | null,
-              updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
-            };
-            if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
-          });
+          unsubCouple = onSnapshot(
+            cRef,
+            (snap) => {
+              if (!snap.exists()) {
+                if (get().couple !== null) set({ couple: null, expenses: [], incomes: [] });
+                return;
+              }
+              const data = snap.data() as any;
+              const next: Couple = {
+                id: cid,
+                nameA: data?.nameA ?? null,
+                nameB: data?.nameB ?? null,
+                currency: (data?.currency ?? null) as any,
+                createdAt: (data?.createdAt ?? null) as Timestamp | null,
+                updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
+              };
+              if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
+            },
+            (err) => console.error("[couple] onSnapshot error:", err)
+          );
 
-          // Expenses — usa 'date' (obrigatório) para não perder docs sem createdAt
+          // Expenses — usa 'date' (evita perder docs que não tenham createdAt)
           const expRef = collection(db, "couples", cid, "expenses");
           const expQ = query(expRef, orderBy("date", "desc"));
           unsubExpenses = onSnapshot(
@@ -193,7 +201,7 @@ export const useStore = create<Store>()(
             (err) => console.error("[expenses] onSnapshot error:", err)
           );
 
-          // Incomes — ordena só por 'month' (YYYY-MM)
+          // Incomes — ordena por 'month' (YYYY-MM)
           const incRef = collection(db, "couples", cid, "incomes");
           const incQ = query(incRef, orderBy("month", "desc"));
           unsubIncomes = onSnapshot(
@@ -238,8 +246,10 @@ export const useStore = create<Store>()(
 
       async joinCouple(coupleId: string) {
         const p = get().profile; if (!p) throw new Error("Não autenticado.");
+
         const cRef = doc(db, "couples", coupleId);
-        const cSnap = await getDoc(cRef); if (!cSnap.exists()) throw new Error("Convite inválido: casal não encontrado.");
+        const cSnap = await getDoc(cRef);
+        if (!cSnap.exists()) throw new Error("Convite inválido: casal não encontrado.");
 
         const members: string[] = (cSnap.data()?.members || []) as string[];
         if (!members.includes(p.uid)) {
