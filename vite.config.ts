@@ -4,10 +4,6 @@ import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
 
-//const NGROK_HOST = process.env.NGROK_HOST || "52a505452cce.ngrok-free.app";
-const isDev = process.env.NODE_ENV !== "production";
-const NGROK_HOST = process.env.NGROK_HOST; // sem default
-const useNgrok = !!NGROK_HOST;
 
 export default defineConfig({
   plugins: [
@@ -51,13 +47,10 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     open: false,
-    allowedHosts: useNgrok ? [NGROK_HOST!, ".ngrok-free.app"] : [],
-    hmr: useNgrok ? { host: NGROK_HOST!, protocol: "wss", clientPort: 443 } : true,
   },
   preview: {
     host: true,
     port: 5173,
-    allowedHosts: useNgrok ? [NGROK_HOST!, ".ngrok-free.app"] : [],
   },
   build: {
     target: "es2020",

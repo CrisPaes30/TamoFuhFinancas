@@ -16,28 +16,26 @@ import {
   browserLocalPersistence,
 } from "firebase/auth";
 
-/** ---------- Config ---------- */
+/** ---------- Config das ENVs ---------- */
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,        // ex: tamo-fuhh.appspot.com
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// Fail-fast se faltar env
-for (const [k, v] of Object.entries(firebaseConfig)) {
-  if (!v) throw new Error(`Firebase env ${k} ausente/undefined`);
+// fail-fast só nos campos essenciais; se não usar Storage, pode deixar vazio
+for (const key of ["apiKey", "authDomain", "projectId", "appId", "messagingSenderId"]) {
+  // @ts-ignore
+  if (!firebaseConfig[key]) throw new Error(`Firebase env ${key} ausente/undefined`);
 }
 
 /** ---------- App singleton ---------- */
 const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
-/** ---------- Firestore ----------
- * Dev: cache em memória (nada no IndexedDB) para evitar sujeira de cache.
- * Prod: cache persistente (IndexedDB) para melhor UX offline.
- */
+/** ---------- Firestore ---------- */
 const isDev = import.meta.env.DEV === true;
 export const db = initializeFirestore(app, {
   localCache: isDev ? memoryLocalCache() : persistentLocalCache(),
@@ -47,53 +45,40 @@ export const db = initializeFirestore(app, {
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// Mantém a sessão após reload/fechar/abrir navegador
-await setPersistence(auth, browserLocalPersistence);
+// ⚠️ Sem top-level await (evita quebra no build)
+setPersistence(auth, browserLocalPersistence).catch((e) => {
+  if (import.meta.env.DEV) console.warn("setPersistence falhou (dev):", e);
+});
 
 /** ---------- Helpers ---------- */
 export function watchAuth(cb: (u: any) => void) {
   return onAuthStateChanged(auth, cb);
 }
-
 export async function signInGoogle() {
-  // (lazy import não é obrigatório aqui, mas mantive simples)
   return signInWithPopup(auth, googleProvider);
 }
-
 export async function logout() {
   await signOut(auth);
 }
 
-/** 💣 Dev: apaga TUDO local (cache/persistência) e recarrega */
+/** 💣 Dev: limpar caches locais — protegido para rodar só no browser */
 export async function devNukeAll() {
-  try {
-    await signOut(auth);
-  } catch {}
+  if (typeof window === "undefined") return; // evita rodar em build/SSR
+  try { await signOut(auth); } catch {}
 
+  try { await clearIndexedDbPersistence(db); } catch {}
   try {
-    // Limpa persistência do Firestore (IndexedDB)
-    await clearIndexedDbPersistence(db);
-  } catch {
-    // Ignora se já não houver persistência ativa
-  }
-
-  // Deleta bancos conhecidos (fallback para browsers sem clearIndexedDbPersistence)
-  try {
-    const names = [
+    // @ts-ignore
+    const listed = (await indexedDB.databases?.())?.map((d: any) => d.name).filter(Boolean) || [];
+    const names = new Set<string>([
       "firebaseLocalStorageDb",
       "firebase-installations-database",
       "firebase-messaging-database",
       "firestore/[DEFAULT]/main",
-    ];
-    // lista dinâmica se suportado
-    // @ts-ignore
-    const listed =
-      (await indexedDB.databases?.())
-        ?.map((d: any) => d.name)
-        .filter(Boolean) || [];
-    const all = Array.from(new Set([...names, ...listed]));
+      ...listed,
+    ]);
     await Promise.all(
-      all.map(
+      [...names].map(
         (name) =>
           new Promise<void>((resolve) => {
             if (!name) return resolve();
@@ -104,20 +89,13 @@ export async function devNukeAll() {
     );
   } catch {}
 
-  try {
-    localStorage.clear();
-  } catch {}
-  try {
-    sessionStorage.clear();
-  } catch {}
+  try { localStorage.clear(); } catch {}
+  try { sessionStorage.clear(); } catch {}
 
-  // Se for PWA / service worker
   try {
-    // @ts-ignore
-    if (self?.caches?.keys) {
-      // @ts-ignore
+    if ("caches" in window) {
       const keys = await caches.keys();
-      await Promise.all(keys.map((k: string) => caches.delete(k)));
+      await Promise.all(keys.map((k) => caches.delete(k)));
     }
   } catch {}
   try {
