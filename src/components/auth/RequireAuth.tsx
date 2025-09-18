@@ -2,20 +2,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { onAuthStateChanged } from "firebase/auth";
 import {
-  doc,
-  getDoc,
-  getDocFromServer,
-  onSnapshot,
-  setDoc,
-  updateDoc,
-  serverTimestamp,
+  doc, getDoc, getDocFromServer, onSnapshot, setDoc, updateDoc, serverTimestamp,
 } from "firebase/firestore";
 import { auth, db, signInGoogle } from "@/lib/firebase";
 import { useStore } from "@/store";
 import Logo from "@/components/Logo";
 import { fixDanglingCoupleId } from "@/services/fixDanglingCouple";
 
-type Props = { children: ReactNode; fallback?: JSX.Element };
+type Child = ReactNode | (() => ReactNode);
+type Props = { children: Child; fallback?: JSX.Element };
 
 function shallowEqual(a: any, b: any) {
   if (a === b) return true;
@@ -27,26 +22,22 @@ function shallowEqual(a: any, b: any) {
 }
 
 export default function RequireAuth({ children, fallback }: Props) {
-  const [phase, setPhase] = useState<"auth-loading" | "no-user" | "user-loading" | "ready">("auth-loading");
+  const [phase, setPhase] = useState<"auth-loading"|"no-user"|"user-loading"|"ready">("auth-loading");
   const [uid, setUid] = useState("");
 
-  // refs anti-loop
+  // anti-loop refs
   const lastProfileRef = useRef<any>(null);
   const lastCoupleIdRef = useRef<string | null>(null);
 
   // 1) Auth listener
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
+    const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
         setUid("");
         lastProfileRef.current = null;
         lastCoupleIdRef.current = null;
-        useStore.setState({
-          profile: null,
-          couple: null,
-          expenses: [],
-          incomes: [],
-        });
+        // zera store sem derrubar para login antes de terminar a fase
+        useStore.setState({ profile: null, couple: null, expenses: [], incomes: [] });
         setPhase("no-user");
         return;
       }
@@ -56,7 +47,7 @@ export default function RequireAuth({ children, fallback }: Props) {
     return () => unsub();
   }, []);
 
-  // 2) users/{uid}: cria se faltar, fixa coupleId fantasma, server-first e snapshot
+  // 2) users/{uid}: cria se faltar, corrige coupleId, server-first + realtime
   useEffect(() => {
     if (!uid) return;
 
@@ -65,8 +56,8 @@ export default function RequireAuth({ children, fallback }: Props) {
 
     (async () => {
       // cria doc se não existir
-      const snap = await getDoc(uref);
-      if (!snap.exists()) {
+      const first = await getDoc(uref);
+      if (!first.exists()) {
         await setDoc(uref, {
           uid,
           coupleId: null,
@@ -76,24 +67,20 @@ export default function RequireAuth({ children, fallback }: Props) {
         });
       }
 
-      // ⚠️ limpa coupleId quebrado (casal apagado nos testes)
-      try {
-        await fixDanglingCoupleId(uid);
-      } catch {
-        // best-effort, segue fluxo
-      }
+      // limpa coupleId órfão (best-effort)
+      try { await fixDanglingCoupleId(uid); } catch {}
 
-      // server-first evita cache podre
+      // pega server-first (evita cache)
       try {
         const s = await getDocFromServer(uref);
-        const serverData = s.exists() ? s.data() : null;
-        if (!shallowEqual(serverData, lastProfileRef.current)) {
-          useStore.getState().setProfile(serverData as any);
-          lastProfileRef.current = serverData;
-          lastCoupleIdRef.current = (serverData as any)?.coupleId ?? null;
+        const data = s.exists() ? s.data() : null;
+        if (!shallowEqual(data, lastProfileRef.current)) {
+          useStore.getState().setProfile(data as any);
+          lastProfileRef.current = data;
+          lastCoupleIdRef.current = (data as any)?.coupleId ?? null;
         }
       } catch {
-        // offline: onSnapshot cobre
+        // offline: segue para realtime
       }
 
       // realtime
@@ -111,57 +98,40 @@ export default function RequireAuth({ children, fallback }: Props) {
     return () => off();
   }, [uid]);
 
-  // 3) couples/{id}: assina pelo id do profile; resolve ponteiro inválido com serverTimestamp
+  // 3) couples/{id}: se perfil aponta, assina casal
   useEffect(() => {
     const coupleId = lastCoupleIdRef.current;
     if (!coupleId) return;
 
     const cref = doc(db, "couples", coupleId);
-    const off = onSnapshot(
-      cref,
-      { includeMetadataChanges: true },
-      async (snap) => {
-        if (!snap.exists()) {
-          // confirma contra o servidor (evita falso 404 do cache)
-          try {
-            const s = await getDocFromServer(cref);
-            if (!s.exists()) {
-              if (uid) {
-                await updateDoc(doc(db, "users", uid), {
-                  coupleId: null,
-                  updatedAt: serverTimestamp(),
-                });
-              }
-              useStore.setState((st) => {
-                const already = st.profile?.coupleId === null && st.couple === null;
-                return already
-                  ? st
-                  : {
-                      ...st,
-                      couple: null,
-                      profile: st.profile ? { ...st.profile, coupleId: null } : null,
-                      expenses: [],
-                      incomes: [],
-                    };
-              });
-              lastCoupleIdRef.current = null;
+    const off = onSnapshot(cref, { includeMetadataChanges: true }, async (snap) => {
+      if (!snap.exists()) {
+        try {
+          const s = await getDocFromServer(cref);
+          if (!s.exists()) {
+            if (uid) {
+              await updateDoc(doc(db, "users", uid), { coupleId: null, updatedAt: serverTimestamp() });
             }
-          } catch {
-            // offline: mantém estado atual
+            useStore.setState((st) => ({
+              ...st,
+              couple: null,
+              profile: st.profile ? { ...st.profile, coupleId: null } : null,
+              expenses: [], incomes: [],
+            }));
+            lastCoupleIdRef.current = null;
           }
-          return;
-        }
-
-        const data = snap.data() as any;
-        const next = {
-          id: coupleId,
-          nameA: data?.nameA ?? null,
-          nameB: data?.nameB ?? null,
-          currency: data?.currency ?? null,
-        };
-        useStore.getState().mergeCouple(next as any);
+        } catch {}
+        return;
       }
-    );
+
+      const d = snap.data() as any;
+      useStore.getState().mergeCouple({
+        id: coupleId,
+        nameA: d?.nameA ?? null,
+        nameB: d?.nameB ?? null,
+        currency: d?.currency ?? null,
+      });
+    });
 
     return () => off();
   }, [uid]);
@@ -174,13 +144,8 @@ export default function RequireAuth({ children, fallback }: Props) {
   if (phase === "no-user") {
     return (
       <div className="relative min-h-[80vh] flex items-center justify-center overflow-hidden px-4">
-        <div
-          className="pointer-events-none absolute inset-0 opacity-40"
-          style={{
-            background:
-              "radial-gradient(600px 300px at 50% 20%, rgba(56,189,248,0.15), rgba(0,0,0,0))",
-          }}
-        />
+        <div className="pointer-events-none absolute inset-0 opacity-40"
+             style={{ background:"radial-gradient(600px 300px at 50% 20%, rgba(56,189,248,0.15), rgba(0,0,0,0))" }} />
         <div className="relative w-full max-w-md">
           <div className="bg-slate-900/70 backdrop-blur-sm rounded-2xl p-6 sm:p-8 shadow-2xl ring-1 ring-white/5">
             <div className="flex flex-col items-center text-center">
@@ -188,19 +153,14 @@ export default function RequireAuth({ children, fallback }: Props) {
               <div className="mt-3 text-[11px] uppercase tracking-wider text-slate-400">
                 Gerencie suas finanças de forma compartilhada
               </div>
-
               <button
                 onClick={() => signInGoogle().catch(console.error)}
                 className="mt-5 inline-flex w-full justify-center items-center gap-3 rounded-lg px-4 py-3
-                  font-semibold text-white bg-[#1a73e8] hover:bg-[#1765cc] active:bg-[#145ab8]
-                  shadow-md focus:outline-none focus:ring-4 focus:ring-[#1a73e8]/35 transition"
+                           font-semibold text-white bg-[#1a73e8] hover:bg-[#1765cc] active:bg-[#145ab8]
+                           shadow-md focus:outline-none focus:ring-4 focus:ring-[#1a73e8]/35 transition"
                 aria-label="Entrar com Google"
               >
-                <img
-                  src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg"
-                  alt=""
-                  className="h-5 w-5"
-                />
+                <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="" className="h-5 w-5" />
                 Entrar com Google
               </button>
             </div>
@@ -210,5 +170,7 @@ export default function RequireAuth({ children, fallback }: Props) {
     );
   }
 
-  return <>{children}</>;
+  // aceita children como função ou nó
+  const rendered = typeof children === "function" ? (children as () => ReactNode)() : children;
+  return <>{rendered}</>;
 }

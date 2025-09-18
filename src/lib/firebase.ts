@@ -1,8 +1,9 @@
 // src/lib/firebase.ts
-import { initializeApp, getApp, getApps } from "firebase/app";
+import { initializeApp, getApps } from "firebase/app";
 import {
   initializeFirestore,
   memoryLocalCache,
+  persistentLocalCache,
   clearIndexedDbPersistence,
 } from "firebase/firestore";
 import {
@@ -12,49 +13,69 @@ import {
   signInWithPopup,
   signOut,
   setPersistence,
-  inMemoryPersistence,
+  browserLocalPersistence,
 } from "firebase/auth";
 
+/** ---------- Config ---------- */
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// fail-fast se faltar env
+// Fail-fast se faltar env
 for (const [k, v] of Object.entries(firebaseConfig)) {
   if (!v) throw new Error(`Firebase env ${k} ausente/undefined`);
 }
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+/** ---------- App singleton ---------- */
+const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
-// 🔒 DEV: Firestore em memória (NADA vai para IndexedDB)
+/** ---------- Firestore ----------
+ * Dev: cache em memória (nada no IndexedDB) para evitar sujeira de cache.
+ * Prod: cache persistente (IndexedDB) para melhor UX offline.
+ */
+const isDev = import.meta.env.DEV === true;
 export const db = initializeFirestore(app, {
-  localCache: memoryLocalCache(),
+  localCache: isDev ? memoryLocalCache() : persistentLocalCache(),
 });
 
+/** ---------- Auth ---------- */
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
-// 🔒 DEV: Auth sem persistência (memória apenas)
-setPersistence(auth, inMemoryPersistence).catch(() => {});
+// Mantém a sessão após reload/fechar/abrir navegador
+await setPersistence(auth, browserLocalPersistence);
 
-// Helpers
+/** ---------- Helpers ---------- */
 export function watchAuth(cb: (u: any) => void) {
   return onAuthStateChanged(auth, cb);
 }
+
 export async function signInGoogle() {
-  await signInWithPopup(auth, googleProvider);
+  // (lazy import não é obrigatório aqui, mas mantive simples)
+  return signInWithPopup(auth, googleProvider);
 }
+
 export async function logout() {
   await signOut(auth);
 }
 
-/** 💣 Dev: apaga TUDO que seja cache/local e recarrega */
+/** 💣 Dev: apaga TUDO local (cache/persistência) e recarrega */
 export async function devNukeAll() {
-  try { await signOut(auth); } catch {}
-  try { await clearIndexedDbPersistence(db); } catch {}
+  try {
+    await signOut(auth);
+  } catch {}
+
+  try {
+    // Limpa persistência do Firestore (IndexedDB)
+    await clearIndexedDbPersistence(db);
+  } catch {
+    // Ignora se já não houver persistência ativa
+  }
 
   // Deleta bancos conhecidos (fallback para browsers sem clearIndexedDbPersistence)
   try {
@@ -66,7 +87,10 @@ export async function devNukeAll() {
     ];
     // lista dinâmica se suportado
     // @ts-ignore
-    const listed = (await indexedDB.databases?.())?.map((d: any) => d.name).filter(Boolean) || [];
+    const listed =
+      (await indexedDB.databases?.())
+        ?.map((d: any) => d.name)
+        .filter(Boolean) || [];
     const all = Array.from(new Set([...names, ...listed]));
     await Promise.all(
       all.map(
@@ -80,8 +104,12 @@ export async function devNukeAll() {
     );
   } catch {}
 
-  try { localStorage.clear(); } catch {}
-  try { sessionStorage.clear(); } catch {}
+  try {
+    localStorage.clear();
+  } catch {}
+  try {
+    sessionStorage.clear();
+  } catch {}
 
   // Se for PWA / service worker
   try {
