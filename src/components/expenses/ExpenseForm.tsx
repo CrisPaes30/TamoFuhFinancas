@@ -4,18 +4,14 @@ import { Timestamp } from "firebase/firestore";
 import { useStore } from "@/store";
 import { toCents } from "@/lib/currency";
 
-type Props = {
-  open: boolean;
-  onClose: () => void;
-  editing?: any | null;
-};
+type Props = { open: boolean; onClose: () => void; editing?: any | null };
 
 export default function ExpenseForm({ open, onClose, editing }: Props) {
   const { couple, addExpense, updateExpense } = useStore();
 
   const [title, setTitle] = useState("");
-  const [amount, setAmount] = useState(""); // em reais (string do input)
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10)); // YYYY-MM-DD
+  const [amount, setAmount] = useState(""); // em reais
+  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [paidBy, setPaidBy] = useState<"A" | "B">("A");
   const [splitA, setSplitA] = useState(1);
   const [splitB, setSplitB] = useState(1);
@@ -25,31 +21,43 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
   const [fixedKind, setFixedKind] =
     useState<"Agua" | "Luz" | "Internet" | "Aluguel" | "Outros">("Outros");
   const [isCard, setIsCard] = useState(false);
-  const [installments, setInstallments] = useState(1);
+
+  // parcelas como string (permite limpar o campo)
+  const [installmentsStr, setInstallmentsStr] = useState("1");
+  const installmentsN = useMemo(() => {
+    const n = parseInt(installmentsStr, 10);
+    if (!Number.isFinite(n)) return 1;
+    return Math.min(36, Math.max(1, n));
+  }, [installmentsStr]);
 
   const [saving, setSaving] = useState(false);
+
   const totalSplit = useMemo(
     () => (Number(splitA) || 0) + (Number(splitB) || 0),
     [splitA, splitB]
   );
 
-  // trava scroll quando o modal abre
+  const isSeriesOccurrence = !!editing?.groupId;
+  const ruleKind = editing?.ruleKind as "fixed" | "installments" | undefined;
+
+  const currency = (couple?.currency ?? "BRL") as "BRL" | "USD" | "EUR";
+  const fmt = (cents: number) =>
+    new Intl.NumberFormat("pt-BR", { style: "currency", currency }).format(
+      (cents || 0) / 100
+    );
+
   useEffect(() => {
     if (!open) return;
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = prev;
-    };
+    return () => { document.body.style.overflow = prev; };
   }, [open]);
 
-  // pré-preenche ao editar
   useEffect(() => {
     if (!editing) return;
     setTitle(editing.title || "");
     setAmount(((editing.amount || 0) / 100).toFixed(2).replace(".", ","));
 
-    // date: Timestamp -> YYYY-MM-DD para o input
     const d: Date =
       editing.date && typeof editing.date?.toDate === "function"
         ? editing.date.toDate()
@@ -60,18 +68,52 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
     setSplitA(editing?.split?.a ?? 1);
     setSplitB(editing?.split?.b ?? 1);
     setCategory(editing.category || "Outros");
+
     setIsFixed(!!editing.isFixed);
     setFixedKind(editing.fixedKind || "Outros");
     setIsCard(!!editing.isCard);
-    setInstallments(editing.installments || 1);
+    setInstallmentsStr(String(editing.installments || 1));
   }, [editing]);
+
+  useEffect(() => {
+    if (open && !editing) {
+      setTitle("");
+      setAmount("");
+      setDate(new Date().toISOString().slice(0, 10));
+      setPaidBy("A");
+      setSplitA(1);
+      setSplitB(1);
+      setCategory("Outros");
+      setIsFixed(false);
+      setFixedKind("Outros");
+      setIsCard(false);
+      setInstallmentsStr("1");
+    }
+  }, [open, editing]);
+
+  function addMonthsLabel(ym: string, delta: number) {
+    const [Y, M] = ym.split("-").map(Number);
+    const base = new Date(Y, (M - 1) + delta, 1);
+    return `${base.getFullYear()}-${String(base.getMonth() + 1).padStart(2, "0")}`;
+  }
+
+  const parcelsPreview = useMemo(() => {
+    if (!isCard || installmentsN < 2) return null;
+    const cents = toCents(amount);
+    if (!Number.isFinite(cents) || cents <= 0) return null;
+
+    const base = Math.floor(cents / installmentsN);
+    const sobra = cents - base * installmentsN;
+    const ymStart = date.slice(0, 7);
+    const ymEnd = addMonthsLabel(ymStart, installmentsN - 1);
+    return { base, sobra, total: installmentsN, ymStart, ymEnd, totalCents: cents };
+  }, [isCard, installmentsN, amount, date]);
 
   if (!open) return null;
 
   async function handleSave() {
     if (!couple) return;
 
-    // amount seguro
     const cents = toCents(amount);
     if (!Number.isFinite(cents) || cents < 0) {
       console.warn("[ExpenseForm] amount inválido:", amount, "→", cents);
@@ -80,31 +122,24 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
 
     const payload = {
       title: title.trim(),
-      amount: cents, // centavos (number)
+      amount: cents,
       paidBy,
-      // YYYY-MM-DD -> Timestamp (new Date('YYYY-MM-DD') é UTC; ok se você trata como dia)
       date: Timestamp.fromDate(new Date(date)),
       category,
       split: {
         a: Number.isFinite(splitA) ? Math.max(0, splitA) : 0,
         b: Number.isFinite(splitB) ? Math.max(0, splitB) : 0,
       },
-      isFixed,
-      fixedKind,
+      isFixed: isCard ? false : isFixed,
+      fixedKind: isCard ? undefined : (isFixed ? fixedKind : undefined),
       isCard,
-      installments,
-      // nada de coupleId aqui — o store usa get().couple?.id
+      installments: isCard ? installmentsN : 1,
     };
-
-    console.log("[ExpenseForm] payload pronto:", payload);
 
     try {
       setSaving(true);
-      if (editing) {
-        await updateExpense(editing.id, payload as any);
-      } else {
-        await addExpense(payload as any); // store adiciona createdAt/updatedAt
-      }
+      if (editing) await updateExpense(editing.id, payload as any);
+      else await addExpense(payload as any);
       onClose();
     } catch (e) {
       console.error("[ExpenseForm] erro ao salvar:", e);
@@ -113,217 +148,183 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
     }
   }
 
+  function onToggleFixed(checked: boolean) {
+    if (checked) { setIsFixed(true); setIsCard(false); setInstallmentsStr("1"); }
+    else setIsFixed(false);
+  }
+  function onToggleCard(checked: boolean) {
+    if (checked) { setIsCard(true); setIsFixed(false); }
+    else { setIsCard(false); setInstallmentsStr("1"); }
+  }
+
+  const paidAName = couple?.nameA ?? "Pessoa A";
+  const paidBName = couple?.nameB ?? "Pessoa B";
+
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
-      role="dialog"
-      aria-modal="true"
-    >
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" role="dialog" aria-modal="true">
       <div className="absolute inset-0 bg-black/60 backdrop-blur-[1px]" onClick={onClose} />
       <div className="relative z-10 w-full max-w-2xl mx-4">
         <div className="bg-slate-900 w-full p-5 rounded-2xl shadow-xl">
-          <h3 className="text-lg font-semibold mb-3">
-            {editing ? "Editar despesa" : "Nova despesa"}
-          </h3>
+          <h3 className="text-lg font-semibold mb-3">{editing ? "Editar despesa" : "Nova despesa"}</h3>
 
           <div className="grid gap-3">
-            <input
-              className="bg-slate-800 h-11 px-3 rounded"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Ex.: Bombom"
-            />
+            <input className="bg-slate-800 h-11 px-3 rounded" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ex.: Conta de água" />
+            <input className="bg-slate-800 h-11 px-3 rounded" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Valor (ex.: 120,00)" inputMode="decimal" />
 
-            <input
-              className="bg-slate-800 h-11 px-3 rounded"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              placeholder="Valor (ex.: 3,50)"
-              inputMode="decimal"
-            />
-
-            {/* data + categoria */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <input
-                className="bg-slate-800 h-11 px-3 rounded"
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-              />
-              <select
-                className="bg-slate-800 h-11 px-3 rounded"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-              >
-                <option>Alimentação</option>
-                <option>Transporte</option>
-                <option>Mercado</option>
-                <option>Lazer</option>
-                <option>Moradia</option>
-                <option>Outros</option>
+              <input className="bg-slate-800 h-11 px-3 rounded" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              <select className="bg-slate-800 h-11 px-3 rounded" value={category} onChange={(e) => setCategory(e.target.value)}>
+                <option>Alimentação</option><option>Transporte</option><option>Mercado</option>
+                <option>Lazer</option><option>Moradia</option><option>Outros</option>
               </select>
             </div>
 
-            {/* quem pagou + divisão */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 items-start">
-              {/* Quem pagou */}
               <div className="bg-slate-800 rounded p-3">
                 <div className="text-xs opacity-80 mb-2">Quem pagou</div>
-                <select
-                  className="bg-slate-700 h-10 px-3 rounded w-full"
-                  value={paidBy}
-                  onChange={(e) => setPaidBy(e.target.value as "A" | "B")}
-                >
-                  <option value="A">{`Pagou: ${couple?.nameA ?? "A"}`}</option>
-                  <option value="B">{`Pagou: ${couple?.nameB ?? "B"}`}</option>
+                <select className="bg-slate-700 h-10 px-3 rounded w-full" value={paidBy} onChange={(e) => setPaidBy(e.target.value as "A" | "B")}>
+                  <option value="A">{`Pagou: ${paidAName}`}</option>
+                  <option value="B">{`Pagou: ${paidBName}`}</option>
                 </select>
 
-                {/* tipo / pagamento */}
                 <div className="text-xs opacity-80 mt-4 mb-2">Tipo e pagamento</div>
 
-                <label className="flex items-center gap-2 mb-2">
+                {isSeriesOccurrence && (
+                  <div className="text-[11px] p-2 rounded bg-amber-500/10 border border-amber-500/30 mb-2">
+                    Esta é uma ocorrência da série
+                    {ruleKind === "fixed" ? " (fixa até dezembro)" : ruleKind === "installments" ? " (parcelado)" : ""}.
+                    Alterações aqui afetam apenas este mês.
+                  </div>
+                )}
+
+                {/* Despesa fixa - texto e checkbox na MESMA linha */}
+                <label
+                  className={`flex items-center gap-2 mb-2 ${isSeriesOccurrence && ruleKind !== "fixed" ? "opacity-60" : ""}`}
+                  htmlFor="chk-fixed"
+                >
                   <input
+                    id="chk-fixed"
                     type="checkbox"
                     className="accent-green-500"
                     checked={isFixed}
-                    onChange={(e) => setIsFixed(e.target.checked)}
+                    onChange={(e) => onToggleFixed(e.target.checked)}
+                    disabled={isSeriesOccurrence && ruleKind !== "fixed"}
                   />
-                  <span className="text-sm">Despesa fixa</span>
+                  <span className="text-sm select-none">Despesa fixa (replicar até dezembro)</span>
                 </label>
 
                 {isFixed && (
                   <div className="mb-3">
-                    <select
-                      className="bg-slate-700 h-10 px-3 rounded w-full"
-                      value={fixedKind}
-                      onChange={(e) => setFixedKind(e.target.value as any)}
-                    >
-                      <option value="Agua">Água</option>
-                      <option value="Luz">Luz</option>
-                      <option value="Internet">Internet</option>
-                      <option value="Aluguel">Aluguel</option>
+                    <select className="bg-slate-700 h-10 px-3 rounded w-full" value={fixedKind}
+                            onChange={(e) => setFixedKind(e.target.value as any)}
+                            disabled={isSeriesOccurrence && ruleKind !== "fixed"}>
+                      <option value="Agua">Água</option><option value="Luz">Luz</option>
+                      <option value="Internet">Internet</option><option value="Aluguel">Aluguel</option>
                       <option value="Outros">Outros</option>
                     </select>
                   </div>
                 )}
 
-                <label className="flex items-center gap-2 mb-2">
+                {/* Cartão de crédito - texto e checkbox na MESMA linha */}
+                <label
+                  className={`flex items-center gap-2 mb-2 ${isSeriesOccurrence && ruleKind !== "installments" ? "opacity-60" : ""}`}
+                  htmlFor="chk-card"
+                >
                   <input
+                    id="chk-card"
                     type="checkbox"
                     className="accent-green-500"
                     checked={isCard}
-                    onChange={(e) => setIsCard(e.target.checked)}
+                    onChange={(e) => onToggleCard(e.target.checked)}
+                    disabled={isSeriesOccurrence && ruleKind !== "installments"}
                   />
-                  <span className="text-sm">Compra no cartão de crédito</span>
+                  <span className="text-sm select-none">Compra no cartão de crédito (parcelado)</span>
                 </label>
 
                 {isCard && (
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs opacity-80">Parcelas</span>
-                    <input
-                      className="bg-slate-700 w-20 h-9 p-1 rounded text-center
-                                 [appearance:textfield]
-                                 [&::-webkit-outer-spin-button]:appearance-none
-                                 [&::-webkit-inner-spin-button]:appearance-none"
-                      type="number"
-                      min={1}
-                      value={installments}
-                      onChange={(e) =>
-                        setInstallments(Math.max(1, parseInt(e.target.value || "1")))
-                      }
-                    />
-                  </div>
+                  <>
+                    <div className="flex items-center gap-2 mt-2">
+                      <span className="text-xs opacity-80">Parcelas</span>
+                      <input
+                        className="bg-slate-700 w-20 h-9 p-1 rounded text-center
+                                   [appearance:textfield]
+                                   [&::-webkit-outer-spin-button]:appearance-none
+                                   [&::-webkit-inner-spin-button]:appearance-none"
+                        type="text" inputMode="numeric" pattern="[0-9]*"
+                        value={installmentsStr}
+                        onChange={(e) => {
+                          const v = e.target.value.replace(/\D/g, "");
+                          setInstallmentsStr(v);
+                        }}
+                        onBlur={() => {
+                          if (!installmentsStr) setInstallmentsStr("1");
+                          else setInstallmentsStr(String(installmentsN));
+                        }}
+                        disabled={isSeriesOccurrence && ruleKind !== "installments"}
+                      />
+                    </div>
+
+                    {installmentsN > 1 && parcelsPreview && (
+                      <div className="text-xs mt-2 p-2 rounded bg-slate-700/40">
+                        <div> Total: <b>{fmt(parcelsPreview.totalCents)}</b> em <b>{parcelsPreview.total}x</b> </div>
+                        <div>
+                          Cada parcela: <b>{fmt(parcelsPreview.base)}</b>
+                          {parcelsPreview.sobra > 0 && <> — <b>{parcelsPreview.sobra}</b> parcela{parcelsPreview.sobra > 1 ? "s" : ""} terão +{fmt(1)}</>}
+                        </div>
+                        <div className="opacity-80">
+                          Período: de <b>{parcelsPreview.ymStart}</b> até <b>{parcelsPreview.ymEnd}</b> (meses consecutivos).
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
 
-              {/* Divisão por pessoa */}
               <div className="bg-slate-800 rounded p-3">
                 <div className="text-xs opacity-80 mb-2">Divisão por pessoa</div>
-
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs opacity-80 truncate">{couple?.nameA}</span>
-                    <input
-                      className="bg-slate-700 w-16 h-9 p-1 rounded text-center
-                                 [appearance:textfield]
-                                 [&::-webkit-outer-spin-button]:appearance-none
-                                 [&::-webkit-inner-spin-button]:appearance-none"
-                      type="number"
-                      min={0}
-                      value={splitA}
-                      onChange={(e) => setSplitA(parseInt(e.target.value || "0"))}
-                    />
+                    <span className="text-xs opacity-80 truncate">{paidAName}</span>
+                    <input className="bg-slate-700 w-16 h-9 p-1 rounded text-center
+                                      [appearance:textfield]
+                                      [&::-webkit-outer-spin-button]:appearance-none
+                                      [&::-webkit-inner-spin-button]:appearance-none"
+                           type="number" min={0} value={splitA}
+                           onChange={(e) => setSplitA(parseInt(e.target.value || "0", 10))} />
                   </label>
-
                   <span className="opacity-60">:</span>
-
                   <label className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs opacity-80 truncate">{couple?.nameB}</span>
-                    <input
-                      className="bg-slate-700 w-16 h-9 p-1 rounded text-center
-                                 [appearance:textfield]
-                                 [&::-webkit-outer-spin-button]:appearance-none
-                                 [&::-webkit-inner-spin-button]:appearance-none"
-                      type="number"
-                      min={0}
-                      value={splitB}
-                      onChange={(e) => setSplitB(parseInt(e.target.value || "0"))}
-                    />
+                    <span className="text-xs opacity-80 truncate">{paidBName}</span>
+                    <input className="bg-slate-700 w-16 h-9 p-1 rounded text-center
+                                      [appearance:textfield]
+                                      [&::-webkit-outer-spin-button]:appearance-none
+                                      [&::-webkit-inner-spin-button]:appearance-none"
+                           type="number" min={0} value={splitB}
+                           onChange={(e) => setSplitB(parseInt(e.target.value || "0", 10))} />
                   </label>
                 </div>
 
                 <div className="flex flex-wrap gap-2 mt-2">
-                  <button
-                    type="button"
-                    className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
-                    onClick={() => {
-                      setSplitA(1);
-                      setSplitB(1);
-                    }}
-                  >
-                    50 / 50
-                  </button>
-                  <button
-                    type="button"
-                    className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
-                    onClick={() => {
-                      setSplitA(1);
-                      setSplitB(0);
-                    }}
-                  >
-                    {couple?.nameA} 100%
-                  </button>
-                  <button
-                    type="button"
-                    className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
-                    onClick={() => {
-                      setSplitA(0);
-                      setSplitB(1);
-                    }}
-                  >
-                    {couple?.nameB} 100%
-                  </button>
+                  <button type="button" className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
+                          onClick={() => { setSplitA(1); setSplitB(1); }}>50 / 50</button>
+                  <button type="button" className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
+                          onClick={() => { setSplitA(1); setSplitB(0); }}>{paidAName} 100%</button>
+                  <button type="button" className="px-2 py-1 h-8 bg-slate-700 rounded text-xs"
+                          onClick={() => { setSplitA(0); setSplitB(1); }}>{paidBName} 100%</button>
                 </div>
 
                 {totalSplit === 0 && (
                   <p className="text-xs text-slate-400 mt-2">
-                    Divisão 0:0 → será registrado como{" "}
-                    <b>despesa pessoal de {paidBy === "A" ? couple?.nameA : couple?.nameB}</b>{" "}
-                    (não altera o saldo).
+                    Divisão 0:0 → será registrado como <b>despesa pessoal de {paidBy === "A" ? paidAName : paidBName}</b> (não altera o saldo).
                   </p>
                 )}
               </div>
             </div>
 
             <div className="flex gap-2 justify-end pt-1">
-              <button className="px-4 h-11 bg-slate-800 rounded" onClick={onClose} disabled={saving}>
-                Cancelar
-              </button>
-              <button
-                className="px-4 h-11 bg-green-500 text-slate-950 font-semibold rounded disabled:opacity-60"
-                onClick={handleSave}
-                disabled={saving || !title.trim()}
-              >
+              <button className="px-4 h-11 bg-slate-800 rounded" onClick={onClose} disabled={saving}>Cancelar</button>
+              <button className="px-4 h-11 bg-green-500 text-slate-950 font-semibold rounded disabled:opacity-60"
+                      onClick={handleSave} disabled={saving || !title.trim()}>
                 {saving ? "Salvando..." : editing ? "Salvar alterações" : "Salvar"}
               </button>
             </div>

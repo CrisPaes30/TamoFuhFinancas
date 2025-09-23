@@ -16,22 +16,37 @@ import {
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
+function cleanUndefined<T extends Record<string, any>>(obj: T): T {
+  const out: any = {};
+  for (const k in obj) if (obj[k] !== undefined) out[k] = obj[k];
+  return out;
+}
+
 /** ---------- Tipos ---------- */
 export type Expense = {
   id: string;
   title: string;
-  amount: number;                 // centavos
+  amount: number; // em centavos
   paidBy: "A" | "B";
-  date: Timestamp;                // sempre Timestamp
+  date: Timestamp;
   category: string;
   split: { a: number; b: number };
-  isFixed?: boolean;
-  fixedKind?: "Agua" | "Luz" | "Internet" | "Aluguel" | "Outros";
-  isCard?: boolean;
-  installments?: number;
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
   deleted?: boolean;
+
+  // ⚙️ novos campos p/ recorrência e parcelado
+  ym?: string;                 // "YYYY-MM" (denormalizado p/ filtros e queries)
+  isFixed?: boolean;           // despesa fixa mensal
+  fixedKind?: "Agua" | "Luz" | "Internet" | "Aluguel" | "Outros";
+  isCard?: boolean;            // despesa de cartão
+  installments?: number;       // total de parcelas (>= 1)
+  installmentNumber?: number;  // nº desta ocorrência (1..installments)
+
+  // 🔗 ligação de ocorrências
+  groupId?: string;            // mesmo id para todas as ocorrências geradas
+  ruleKind?: "fixed" | "installments"; // como foi gerada
+  generated?: boolean;         // true nas cópias geradas automaticamente
 };
 
 export type Income = {
@@ -102,6 +117,40 @@ function shallowCoupleEqual(a?: Couple | null, b?: Couple | null) {
   return a.id === b.id && a.nameA === b.nameA && a.nameB === b.nameB && a.currency === b.currency;
 }
 
+/** ---------- Helpers de data/parcelas locais ---------- */
+function toYMFromTimestamp(ts: Timestamp): string {
+  const d = ts.toDate();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+function addMonths(ym: string, delta: number): string {
+  const [Y, M] = ym.split("-").map(Number);
+  const base = new Date(Y, (M - 1) + delta, 1);
+  const y = base.getFullYear();
+  const m = String(base.getMonth() + 1).padStart(2, "0");
+  return `${y}-${m}`;
+}
+function endOfYearMonthsFrom(ymStart: string): string[] {
+  const [Y, M] = ymStart.split("-").map(Number);
+  const months: string[] = [];
+  for (let i = 0; i <= (12 - M); i++) months.push(addMonths(ymStart, i));
+  return months;
+}
+function monthsForward(ymStart: string, count: number): string[] {
+  return Array.from({ length: count }, (_, i) => addMonths(ymStart, i));
+}
+function centsSplitEqually(total: number, parts: number): number[] {
+  const base = Math.floor(total / parts);
+  const sobra = total - base * parts;
+  return Array.from({ length: parts }, (_, i) => base + (i < sobra ? 1 : 0));
+}
+function uuid(): string {
+  // crypto.randomUUID disponível na maioria dos browsers modernos
+  // fallback simples para dev
+  return (globalThis as any)?.crypto?.randomUUID?.() ?? `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+}
+
 /** Listeners globais */
 let unsubCouple: null | (() => void) = null;
 let unsubExpenses: null | (() => void) = null;
@@ -162,8 +211,7 @@ export const useStore = create<Store>()(
         if (changedCouple || needAttach) {
           const cid = p.coupleId!;
 
-          // 🔧 self-heal: garante que o usuário atual está em couples/{cid}.members
-          // (ignora erro se regras bloquearem; nesse caso, faça inclusão via console)
+          // 🔧 self-heal
           get().joinCouple(cid).catch(() => {});
 
           // Couple
@@ -189,7 +237,7 @@ export const useStore = create<Store>()(
             (err) => console.error("[couple] onSnapshot error:", err)
           );
 
-          // Expenses — usa 'date' (evita perder docs que não tenham createdAt)
+          // Expenses
           const expRef = collection(db, "couples", cid, "expenses");
           const expQ = query(expRef, orderBy("date", "desc"));
           unsubExpenses = onSnapshot(
@@ -201,7 +249,7 @@ export const useStore = create<Store>()(
             (err) => console.error("[expenses] onSnapshot error:", err)
           );
 
-          // Incomes — ordena por 'month' (YYYY-MM)
+          // Incomes
           const incRef = collection(db, "couples", cid, "incomes");
           const incQ = query(incRef, orderBy("month", "desc"));
           unsubIncomes = onSnapshot(
@@ -265,8 +313,7 @@ export const useStore = create<Store>()(
       // ---------- DESPESAS ----------
       async addExpense(data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
-
-        // normaliza 'date' em Timestamp
+      
         const normalizedDate =
           data.date instanceof Timestamp
             ? data.date
@@ -275,22 +322,100 @@ export const useStore = create<Store>()(
                   ? new Date((data as any).date)
                   : new Date((data as any).date ?? Date.now())
               );
-
-        await addDoc(collection(db, "couples", cid, "expenses"), {
+      
+        const ymStart = toYMFromTimestamp(normalizedDate);
+      
+        const isCard = !!data.isCard;
+        const installments = Math.max(1, data.installments ?? 1);
+        const isFixed = !!data.isFixed;
+      
+        const mustGenInstallments = isCard && installments > 1;
+        const mustGenFixed = !mustGenInstallments && isFixed; // parcelado tem prioridade
+        const gid = (mustGenInstallments || mustGenFixed) ? uuid() : undefined;
+      
+        const col = collection(db, "couples", cid, "expenses");
+      
+        // 🚗 Parcelado
+        if (mustGenInstallments) {
+          const yms = monthsForward(ymStart, installments);
+          const parts = centsSplitEqually(data.amount, installments);
+      
+          for (let i = 0; i < installments; i++) {
+            const docData = cleanUndefined({
+              ...data,
+              date:
+                i === 0
+                  ? normalizedDate
+                  : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
+              ym: yms[i],
+              amount: parts[i],
+              isCard: true,
+              installments,               // sempre número válido
+              installmentNumber: i + 1,   // sempre número válido
+              isFixed: false,
+              fixedKind: undefined,       // será removido pelo cleanUndefined
+              ruleKind: "installments",
+              groupId: gid,
+              generated: i > 0,
+              deleted: data.deleted ?? false,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            await addDoc(col, docData as any);
+          }
+          return;
+        }
+      
+        // 📆 Fixa até dezembro
+        if (mustGenFixed) {
+          const yms = endOfYearMonthsFrom(ymStart);
+          for (let i = 0; i < yms.length; i++) {
+            const docData = cleanUndefined({
+              ...data,
+              date:
+                i === 0
+                  ? normalizedDate
+                  : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
+              ym: yms[i],
+              isFixed: true,
+              // NÃO envie installments/instalmentNumber como undefined
+              isCard: false,
+              installments: undefined,        // será removido
+              installmentNumber: undefined,   // será removido
+              ruleKind: "fixed",
+              groupId: gid,
+              generated: i > 0,
+              deleted: data.deleted ?? false,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+            await addDoc(col, docData as any);
+          }
+          return;
+        }
+      
+        // 🟢 Simples (1 doc)
+        const docData = cleanUndefined({
           ...data,
           date: normalizedDate,
+          ym: ymStart,
+          // Se não for cartão, garanta que installments não vá undefined:
+          installments: data.isCard ? Math.max(1, data.installments ?? 1) : 1,
+          // Evite fixedKind undefined:
+          fixedKind: data.isFixed ? data.fixedKind : undefined,
           deleted: data.deleted ?? false,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-        } as any);
+        });
+        await addDoc(col, docData as any);
       },
-
+      
       async updateExpense(id, data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
-        const payload: any = { ...data, updatedAt: serverTimestamp() };
-
+        const payload: any = { ...data };
+      
         if (data.date !== undefined) {
-          payload.date =
+          const newTs =
             data.date instanceof Timestamp
               ? data.date
               : Timestamp.fromDate(
@@ -298,10 +423,19 @@ export const useStore = create<Store>()(
                     ? new Date((data as any).date)
                     : new Date((data as any).date ?? Date.now())
                 );
+          payload.date = newTs;
+          payload.ym = toYMFromTimestamp(newTs);
         }
-
-        await updateDoc(doc(db, "couples", cid, "expenses", id), payload);
+      
+        // 🚿 remova undefineds antes de enviar
+        const clean = cleanUndefined({
+          ...payload,
+          updatedAt: serverTimestamp(),
+        });
+      
+        await updateDoc(doc(db, "couples", cid, "expenses", id), clean);
       },
+      
 
       async removeExpense(id) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");

@@ -46,9 +46,29 @@ export default function Dashboard() {
 
   const { nameA = "Pessoa A", nameB = "Pessoa B", currency = "BRL" } = couple;
 
+  // Helper para obter o "YYYY-MM" de cada despesa
+  function ymOf(e: any): string {
+    if (e?.ym) return e.ym;
+    try {
+      const d =
+        e?.date && typeof e.date?.toDate === "function"
+          ? e.date.toDate()
+          : new Date(e?.date);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      return `${y}-${m}`;
+    } catch {
+      return "";
+    }
+  }
+
+  // Saldo do MÊS selecionado
   const saldoA = useMemo(() => {
     let sA = 0;
-    for (const e of (expenses ?? []).filter((e) => !e?.deleted)) {
+    const monthExpenses = (expenses ?? []).filter(
+      (e) => !e?.deleted && ymOf(e) === selectedMonth
+    );
+    for (const e of monthExpenses) {
       const { Va, Vb } = computeShares(
         e.amount ?? 0,
         e?.split?.a ?? 50,
@@ -59,25 +79,33 @@ export default function Dashboard() {
       else sA -= (e.amount ?? 0) - Vb;
     }
     return sA;
-  }, [expenses]);
+  }, [expenses, selectedMonth]);
 
+  const labelMes = monthLabelPT(selectedMonth);
   const msg =
-    saldoA >= 0
-      ? `${nameB} deve ${fromCents(saldoA, currency)} para ${nameA}`
-      : `${nameA} deve ${fromCents(-saldoA, currency)} para ${nameB}`;
+    saldoA === 0
+      ? `Sem diferenças entre ${nameA} e ${nameB} em ${labelMes}`
+      : saldoA > 0
+      ? `${nameB} deve ${fromCents(saldoA, currency)} para ${nameA} em ${labelMes}`
+      : `${nameA} deve ${fromCents(-saldoA, currency)} para ${nameB} em ${labelMes}`;
 
   return (
     <div className="grid gap-4">
       {/* Barra com o código, fora do card */}
       <ShareInviteBar />
-      {/* Card Saldo (único) com botão de convite à direita */}
+
+      {/* Card Saldo */}
       <div className="bg-slate-900 p-4 rounded-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h3 className="font-semibold mb-1">Saldo</h3>
+            <h3 className="font-semibold mb-1">Saldo — {labelMes}</h3>
             <p className="opacity-90">{msg}</p>
             <div className="mt-3 flex gap-2">
-              <button className="bg-slate-800 px-3 py-2 rounded">
+              <button
+                className="bg-slate-800 px-3 py-2 rounded disabled:opacity-50"
+                disabled={saldoA === 0}
+                // onClick={() => settleBalance()} // quando conectar a ação
+              >
                 Acertar agora
               </button>
               <button
@@ -121,9 +149,7 @@ export default function Dashboard() {
           value={selectedMonth}
           onChange={(e) => setSelectedMonth(e.target.value)}
         />
-        <div className="ml-auto text-xs opacity-70">
-          {monthLabelPT(selectedMonth)}
-        </div>
+        <div className="ml-auto text-xs opacity-70">{labelMes}</div>
       </div>
 
       <ExpenseList ym={selectedMonth} onEdit={setEditing} />
