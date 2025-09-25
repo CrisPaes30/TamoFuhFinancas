@@ -13,6 +13,7 @@ import {
   serverTimestamp,
   updateDoc,
   Timestamp,
+  arrayUnion,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 
@@ -35,26 +36,24 @@ export type Expense = {
   updatedAt?: Timestamp;
   deleted?: boolean;
 
-  // ⚙️ novos campos p/ recorrência e parcelado
-  ym?: string;                 // "YYYY-MM" (denormalizado p/ filtros e queries)
-  isFixed?: boolean;           // despesa fixa mensal
+  ym?: string;
+  isFixed?: boolean;
   fixedKind?: "Agua" | "Luz" | "Internet" | "Aluguel" | "Outros";
-  isCard?: boolean;            // despesa de cartão
-  installments?: number;       // total de parcelas (>= 1)
-  installmentNumber?: number;  // nº desta ocorrência (1..installments)
+  isCard?: boolean;
+  installments?: number;
+  installmentNumber?: number;
 
-  // 🔗 ligação de ocorrências
-  groupId?: string;            // mesmo id para todas as ocorrências geradas
-  ruleKind?: "fixed" | "installments"; // como foi gerada
-  generated?: boolean;         // true nas cópias geradas automaticamente
+  groupId?: string;
+  ruleKind?: "fixed" | "installments";
+  generated?: boolean;
 };
 
 export type Income = {
   id: string;
   person: "A" | "B";
   source: string;
-  amount: number;                 // centavos
-  month: string;                  // YYYY-MM
+  amount: number; // centavos
+  month: string;  // YYYY-MM
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 };
@@ -78,8 +77,8 @@ export type UserProfile = {
 
 /** ---------- Estado & Ações ---------- */
 type Store = {
-  couple: Couple | null | undefined; // undefined = carregando
-  profile: UserProfile | null;       // null = sem user
+  couple: Couple | null | undefined;
+  profile: UserProfile | null;
   expenses: Expense[];
   incomes: Income[];
 
@@ -117,7 +116,7 @@ function shallowCoupleEqual(a?: Couple | null, b?: Couple | null) {
   return a.id === b.id && a.nameA === b.nameA && a.nameB === b.nameB && a.currency === b.currency;
 }
 
-/** ---------- Helpers de data/parcelas locais ---------- */
+/** ---------- Helpers de data ---------- */
 function toYMFromTimestamp(ts: Timestamp): string {
   const d = ts.toDate();
   const y = d.getFullYear();
@@ -146,8 +145,6 @@ function centsSplitEqually(total: number, parts: number): number[] {
   return Array.from({ length: parts }, (_, i) => base + (i < sobra ? 1 : 0));
 }
 function uuid(): string {
-  // crypto.randomUUID disponível na maioria dos browsers modernos
-  // fallback simples para dev
   return (globalThis as any)?.crypto?.randomUUID?.() ?? `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
 }
 
@@ -162,11 +159,63 @@ function clearListeners() {
   try { unsubIncomes?.(); } finally { unsubIncomes = null; }
 }
 
+/** ---------- Self-heal de membresia ---------- */
+async function ensureMembership(cid: string, uid: string) {
+  try {
+    await updateDoc(doc(db, "couples", cid), {
+      members: arrayUnion(uid),
+      updatedAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.debug("[ensureMembership] ignorado:", e);
+  }
+}
+
+/** ---------- Fallback automático de índice (expenses) ---------- */
+function attachExpensesListener(
+  cid: string,
+  set: (partial: Partial<Pick<Store, "expenses">>) => void
+) {
+  const colRef = collection(db, "couples", cid, "expenses");
+  const qWithIndex = query(colRef, orderBy("date", "desc"), orderBy("createdAt", "desc"));
+
+  try { unsubExpenses?.(); } catch {}
+  unsubExpenses = onSnapshot(
+    qWithIndex,
+    (snap) => {
+      const list: Expense[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+      set({ expenses: list });
+    },
+    (err: any) => {
+      const needsIndex =
+        err?.code === "failed-precondition" ||
+        (typeof err?.message === "string" && /requires an index/i.test(err.message));
+
+      if (!needsIndex) {
+        console.error("[expenses] onSnapshot error:", err);
+        return;
+      }
+
+      console.warn("[expenses] sem índice composto, caindo para orderBy(date) somente");
+      try { unsubExpenses?.(); } catch {}
+      const qSimple = query(colRef, orderBy("date", "desc"));
+      unsubExpenses = onSnapshot(
+        qSimple,
+        (snap2) => {
+          const list: Expense[] = snap2.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+          set({ expenses: list });
+        },
+        (err2) => console.error("[expenses] fallback error:", err2)
+      );
+    }
+  );
+}
+
 export const useStore = create<Store>()(
   persist(
     (set, get) => ({
       profile: null,
-      couple: undefined, // carregando no boot
+      couple: undefined,
       expenses: [],
       incomes: [],
 
@@ -175,7 +224,9 @@ export const useStore = create<Store>()(
         const prevCoupleId = prevProfile?.coupleId ?? null;
         const nextCoupleId = p?.coupleId ?? null;
 
-        if (shallowEqual(prevProfile, p) && prevCoupleId === nextCoupleId) return;
+        // ✅ só retorna se NADA mudou e os listeners já estão ativos
+        const listenersActive = !!(unsubCouple && unsubExpenses && unsubIncomes);
+        if (shallowEqual(prevProfile, p) && prevCoupleId === nextCoupleId && listenersActive) return;
 
         const changedCouple = prevCoupleId !== nextCoupleId;
 
@@ -205,61 +256,57 @@ export const useStore = create<Store>()(
           set({ couple: { id: p.coupleId } });
         }
 
-        // 🔑 Reanexa listeners no primeiro boot (mesmo sem troca de casal)
+        // ✅ rebind se cache trouxe couple=null ou se listeners não estão ativos
+        const needRebindBecauseCache =
+          !!p.coupleId && (get().couple === null || !listenersActive);
+
+        // já existia
         const needAttach = !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes);
 
-        if (changedCouple || needAttach) {
+        if (changedCouple || needAttach || needRebindBecauseCache) {
           const cid = p.coupleId!;
+          const uid = p.uid;
 
-          // 🔧 self-heal
-          get().joinCouple(cid).catch(() => {});
+          ensureMembership(cid, uid).finally(() => {
+            // Couple
+            const cRef = doc(db, "couples", cid);
+            unsubCouple = onSnapshot(
+              cRef,
+              (snap) => {
+                if (!snap.exists()) {
+                  if (get().couple !== null) set({ couple: null, expenses: [], incomes: [] });
+                  return;
+                }
+                const data = snap.data() as any;
+                const next: Couple = {
+                  id: cid,
+                  nameA: data?.nameA ?? null,
+                  nameB: data?.nameB ?? null,
+                  currency: (data?.currency ?? null) as any,
+                  createdAt: (data?.createdAt ?? null) as Timestamp | null,
+                  updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
+                };
+                if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
+              },
+              (err) => console.error("[couple] onSnapshot error:", err)
+            );
 
-          // Couple
-          const cRef = doc(db, "couples", cid);
-          unsubCouple = onSnapshot(
-            cRef,
-            (snap) => {
-              if (!snap.exists()) {
-                if (get().couple !== null) set({ couple: null, expenses: [], incomes: [] });
-                return;
-              }
-              const data = snap.data() as any;
-              const next: Couple = {
-                id: cid,
-                nameA: data?.nameA ?? null,
-                nameB: data?.nameB ?? null,
-                currency: (data?.currency ?? null) as any,
-                createdAt: (data?.createdAt ?? null) as Timestamp | null,
-                updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
-              };
-              if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
-            },
-            (err) => console.error("[couple] onSnapshot error:", err)
-          );
+            // Expenses com fallback de índice
+            attachExpensesListener(cid, (partial) => set(partial));
 
-          // Expenses
-          const expRef = collection(db, "couples", cid, "expenses");
-          const expQ = query(expRef, orderBy("date", "desc"));
-          unsubExpenses = onSnapshot(
-            expQ,
-            (snap) => {
-              const list: Expense[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-              set({ expenses: list });
-            },
-            (err) => console.error("[expenses] onSnapshot error:", err)
-          );
-
-          // Incomes
-          const incRef = collection(db, "couples", cid, "incomes");
-          const incQ = query(incRef, orderBy("month", "desc"));
-          unsubIncomes = onSnapshot(
-            incQ,
-            (snap) => {
-              const list: Income[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
-              set({ incomes: list });
-            },
-            (err) => console.error("[incomes] onSnapshot error:", err)
-          );
+            // Incomes
+            const incRef = collection(db, "couples", cid, "incomes");
+            const incQ   = query(incRef, orderBy("month", "desc"));
+            try { unsubIncomes?.(); } catch {}
+            unsubIncomes = onSnapshot(
+              incQ,
+              (snap) => {
+                const list: Income[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+                set({ incomes: list });
+              },
+              (err) => console.error("[incomes] onSnapshot error:", err)
+            );
+          });
         }
       },
 
@@ -299,10 +346,10 @@ export const useStore = create<Store>()(
         const cSnap = await getDoc(cRef);
         if (!cSnap.exists()) throw new Error("Convite inválido: casal não encontrado.");
 
-        const members: string[] = (cSnap.data()?.members || []) as string[];
-        if (!members.includes(p.uid)) {
-          await updateDoc(cRef, { members: [...members, p.uid], updatedAt: serverTimestamp() });
-        }
+        await updateDoc(cRef, {
+          members: arrayUnion(p.uid),
+          updatedAt: serverTimestamp(),
+        });
 
         if (p.coupleId !== coupleId) {
           await updateDoc(doc(db, "users", p.uid), { coupleId, updatedAt: serverTimestamp() });
@@ -313,7 +360,7 @@ export const useStore = create<Store>()(
       // ---------- DESPESAS ----------
       async addExpense(data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
-      
+
         const normalizedDate =
           data.date instanceof Timestamp
             ? data.date
@@ -322,38 +369,34 @@ export const useStore = create<Store>()(
                   ? new Date((data as any).date)
                   : new Date((data as any).date ?? Date.now())
               );
-      
+
         const ymStart = toYMFromTimestamp(normalizedDate);
-      
+
         const isCard = !!data.isCard;
         const installments = Math.max(1, data.installments ?? 1);
         const isFixed = !!data.isFixed;
-      
+
         const mustGenInstallments = isCard && installments > 1;
-        const mustGenFixed = !mustGenInstallments && isFixed; // parcelado tem prioridade
+        const mustGenFixed = !mustGenInstallments && isFixed;
         const gid = (mustGenInstallments || mustGenFixed) ? uuid() : undefined;
-      
+
         const col = collection(db, "couples", cid, "expenses");
-      
-        // 🚗 Parcelado
+
         if (mustGenInstallments) {
           const yms = monthsForward(ymStart, installments);
           const parts = centsSplitEqually(data.amount, installments);
-      
+
           for (let i = 0; i < installments; i++) {
             const docData = cleanUndefined({
               ...data,
-              date:
-                i === 0
-                  ? normalizedDate
-                  : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
+              date: i === 0 ? normalizedDate : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
               ym: yms[i],
               amount: parts[i],
               isCard: true,
-              installments,               // sempre número válido
-              installmentNumber: i + 1,   // sempre número válido
+              installments,
+              installmentNumber: i + 1,
               isFixed: false,
-              fixedKind: undefined,       // será removido pelo cleanUndefined
+              fixedKind: undefined,
               ruleKind: "installments",
               groupId: gid,
               generated: i > 0,
@@ -365,23 +408,18 @@ export const useStore = create<Store>()(
           }
           return;
         }
-      
-        // 📆 Fixa até dezembro
+
         if (mustGenFixed) {
           const yms = endOfYearMonthsFrom(ymStart);
           for (let i = 0; i < yms.length; i++) {
             const docData = cleanUndefined({
               ...data,
-              date:
-                i === 0
-                  ? normalizedDate
-                  : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
+              date: i === 0 ? normalizedDate : Timestamp.fromDate(new Date(yms[i] + "-01T12:00:00")),
               ym: yms[i],
               isFixed: true,
-              // NÃO envie installments/instalmentNumber como undefined
               isCard: false,
-              installments: undefined,        // será removido
-              installmentNumber: undefined,   // será removido
+              installments: undefined,
+              installmentNumber: undefined,
               ruleKind: "fixed",
               groupId: gid,
               generated: i > 0,
@@ -393,15 +431,12 @@ export const useStore = create<Store>()(
           }
           return;
         }
-      
-        // 🟢 Simples (1 doc)
+
         const docData = cleanUndefined({
           ...data,
           date: normalizedDate,
           ym: ymStart,
-          // Se não for cartão, garanta que installments não vá undefined:
           installments: data.isCard ? Math.max(1, data.installments ?? 1) : 1,
-          // Evite fixedKind undefined:
           fixedKind: data.isFixed ? data.fixedKind : undefined,
           deleted: data.deleted ?? false,
           createdAt: serverTimestamp(),
@@ -409,11 +444,11 @@ export const useStore = create<Store>()(
         });
         await addDoc(col, docData as any);
       },
-      
+
       async updateExpense(id, data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         const payload: any = { ...data };
-      
+
         if (data.date !== undefined) {
           const newTs =
             data.date instanceof Timestamp
@@ -426,16 +461,14 @@ export const useStore = create<Store>()(
           payload.date = newTs;
           payload.ym = toYMFromTimestamp(newTs);
         }
-      
-        // 🚿 remova undefineds antes de enviar
+
         const clean = cleanUndefined({
           ...payload,
           updatedAt: serverTimestamp(),
         });
-      
+
         await updateDoc(doc(db, "couples", cid, "expenses", id), clean);
       },
-      
 
       async removeExpense(id) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
@@ -469,8 +502,8 @@ export const useStore = create<Store>()(
       name: "tf-store",
       version: 1,
       storage: createJSONStorage(() => localStorage),
-      // Persistimos só o essencial para evitar rehidratar listas grandes
-      partialize: (s) => ({ profile: s.profile, couple: s.couple }),
+      // ✅ NÃO persistimos 'couple' para evitar reidratar null antigo
+      partialize: (s) => ({ profile: s.profile }),
       migrate: (p: any) => p,
     }
   )

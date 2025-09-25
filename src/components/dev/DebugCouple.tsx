@@ -1,6 +1,6 @@
 // src/dev/DebugCouple.tsx
 import { auth, db } from "@/lib/firebase";
-import { doc, getDocFromServer } from "firebase/firestore";
+import { doc, getDocFromServer, updateDoc, serverTimestamp, arrayUnion } from "firebase/firestore";
 import { useEffect, useState } from "react";
 
 export default function DebugCouple() {
@@ -41,4 +41,17 @@ export default function DebugCouple() {
       <pre className="whitespace-pre-wrap">{out}</pre>
     </div>
   );
+}
+
+
+export async function fixMembership(cid: string, uid: string) {
+  await updateDoc(doc(db, "users", uid), {
+    coupleId: cid,
+    updatedAt: serverTimestamp(),
+  });
+  await updateDoc(doc(db, "couples", cid), {
+    members: arrayUnion(uid),
+    updatedAt: serverTimestamp(),
+  });
+  console.log("✅ Vinculada:", { cid, uid });
 }
