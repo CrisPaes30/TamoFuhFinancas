@@ -30,3 +30,7 @@ export function monthOf(obj: any): string {
   if (obj?.month && typeof obj.month === "string") return obj.month;
   return "";
 }
+
+export function atLocalNoon(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0, 0);
+}

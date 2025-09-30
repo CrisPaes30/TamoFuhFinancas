@@ -1,4 +1,3 @@
-// src/store/index.ts
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import {
@@ -27,7 +26,7 @@ function cleanUndefined<T extends Record<string, any>>(obj: T): T {
 export type Expense = {
   id: string;
   title: string;
-  amount: number; // em centavos
+  amount: number; // centavos
   paidBy: "A" | "B";
   date: Timestamp;
   category: string;
@@ -67,7 +66,6 @@ export type Couple = {
   members?: string[];
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
-  /** <- adicionado para refletir opções salvas */
   categories?: string[] | null;
 };
 
@@ -98,7 +96,7 @@ type Store = {
   addExpense: (data: Omit<Expense, "id" | "createdAt" | "updatedAt">) => Promise<void>;
   updateExpense: (id: string, data: Partial<Expense>) => Promise<void>;
   removeExpense: (id: string) => Promise<void>;
-  deleteExpense: (id: string, opts?: { hard?: boolean }) => Promise<void>; // ✅ novo
+  deleteExpense: (id: string, opts?: { hard?: boolean }) => Promise<void>;
 
   addIncome: (data: Omit<Income, "id" | "createdAt" | "updatedAt" | "date">) => Promise<void>;
   updateIncome: (id: string, data: Partial<Income>) => Promise<void>;
@@ -119,9 +117,7 @@ function shallowCoupleEqual(a?: Couple | null, b?: Couple | null) {
   if (!a || !b) return false;
   const ac = a.categories ?? [];
   const bc = b.categories ?? [];
-  const catsEq =
-    ac.length === bc.length &&
-    ac.every((v, i) => v === bc[i]);
+  const catsEq = ac.length === bc.length && ac.every((v, i) => v === bc[i]);
   return (
     a.id === b.id &&
     a.nameA === b.nameA &&
@@ -160,7 +156,12 @@ function centsSplitEqually(total: number, parts: number): number[] {
   return Array.from({ length: parts }, (_, i) => base + (i < sobra ? 1 : 0));
 }
 function uuid(): string {
-  return (globalThis as any)?.crypto?.randomUUID?.() ?? `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+  return (globalThis as any)?.crypto?.randomUUID?.() ??
+    `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
+}
+/** força a data para 12:00 no fuso local (evita cair no mês anterior) */
+function atLocalNoon(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 12, 0, 0, 0);
 }
 
 /** Listeners globais */
@@ -231,8 +232,8 @@ export const useStore = create<Store>()(
     (set, get) => ({
       profile: null,
       couple: undefined,
-      expenses: [],
-      incomes: [],
+      expenses: [] as Expense[],
+      incomes: [] as Income[],
 
       setProfile: (p) => {
         const prevProfile = get().profile;
@@ -246,7 +247,7 @@ export const useStore = create<Store>()(
 
         if (changedCouple || !p) {
           clearListeners();
-          set({ expenses: [], incomes: [] });
+          set({ expenses: [] as Expense[], incomes: [] as Income[] });
         }
 
         if (!p) {
@@ -273,7 +274,8 @@ export const useStore = create<Store>()(
         const needRebindBecauseCache =
           !!p.coupleId && (get().couple === null || !listenersActive);
 
-        const needAttach = !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes);
+        const needAttach =
+          !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes);
 
         if (changedCouple || needAttach || needRebindBecauseCache) {
           const cid = p.coupleId!;
@@ -286,7 +288,7 @@ export const useStore = create<Store>()(
               cRef,
               (snap) => {
                 if (!snap.exists()) {
-                  if (get().couple !== null) set({ couple: null, expenses: [], incomes: [] });
+                  if (get().couple !== null) set({ couple: null, expenses: [] as Expense[], incomes: [] as Income[] });
                   return;
                 }
                 const data = snap.data() as any;
@@ -297,7 +299,6 @@ export const useStore = create<Store>()(
                   currency: (data?.currency ?? null) as any,
                   createdAt: (data?.createdAt ?? null) as Timestamp | null,
                   updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
-                  // <- refletir categorias salvas
                   categories: (data?.categories ?? null) as string[] | null,
                 };
                 if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
@@ -305,10 +306,10 @@ export const useStore = create<Store>()(
               (err) => console.error("[couple] onSnapshot error:", err)
             );
 
-            // Expenses com fallback de índice
+            // Expenses
             attachExpensesListener(cid, (partial) => set(partial));
 
-            // Incomes (ordenado por date)
+            // Incomes
             const incRef = collection(db, "couples", cid, "incomes");
             const incQ   = query(incRef, orderBy("date", "desc"));
             try { unsubIncomes?.(); } catch {}
@@ -331,57 +332,20 @@ export const useStore = create<Store>()(
         if (!shallowCoupleEqual(prev, next)) set({ couple: next });
       },
 
-      // ---------- AÇÕES DE CASAL ----------
-      async createCouple(input) {
-        const p = get().profile;
-        if (!p) throw new Error("Não autenticado.");
-
-        const newRef = await addDoc(collection(db, "couples"), {
-          nameA: input.nameA,
-          nameB: input.nameB,
-          currency: input.currency,
-          members: [p.uid],
-          createdAt: serverTimestamp(),
-          updatedAt: serverTimestamp(),
-        });
-
-        await updateDoc(doc(db, "users", p.uid), {
-          coupleId: newRef.id,
-          updatedAt: serverTimestamp(),
-        });
-
-        if (p.coupleId !== newRef.id) set({ profile: { ...p, coupleId: newRef.id } });
-      },
-
-      async joinCouple(coupleId: string) {
-        const p = get().profile; if (!p) throw new Error("Não autenticado.");
-
-        const cRef = doc(db, "couples", coupleId);
-        const cSnap = await getDoc(cRef);
-        if (!cSnap.exists()) throw new Error("Convite inválido: casal não encontrado.");
-
-        await updateDoc(cRef, {
-          members: arrayUnion(p.uid),
-          updatedAt: serverTimestamp(),
-        });
-
-        if (p.coupleId !== coupleId) {
-          await updateDoc(doc(db, "users", p.uid), { coupleId, updatedAt: serverTimestamp() });
-          set({ profile: { ...p, coupleId } });
-        }
-      },
-
       // ---------- DESPESAS ----------
       async addExpense(data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const rawDate = (data as any).date;
 
         const normalizedDate =
           data.date instanceof Timestamp
             ? data.date
             : Timestamp.fromDate(
-                typeof (data as any).date === "string"
-                  ? new Date((data as any).date)
-                  : new Date((data as any).date ?? Date.now())
+                rawDate instanceof Date
+                  ? atLocalNoon(rawDate)
+                  : typeof rawDate === "string"
+                    ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? `${rawDate}T12:00:00` : rawDate)
+                    : atLocalNoon(new Date(rawDate ?? Date.now()))
               );
 
         const ymStart = toYMFromTimestamp(normalizedDate);
@@ -463,24 +427,25 @@ export const useStore = create<Store>()(
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         const payload: any = { ...data };
 
+        if ("ym" in payload) delete payload.ym; // derive sempre
+
         if (data.date !== undefined) {
-          const newTs =
-            data.date instanceof Timestamp
-              ? data.date
-              : Timestamp.fromDate(
-                  typeof (data as any).date === "string"
-                    ? new Date((data as any).date)
-                    : new Date((data as any).date ?? Date.now())
-                );
+          const raw = (data as any).date;
+          let d: Date;
+
+          if (raw instanceof Timestamp) d = raw.toDate();
+          else if (raw instanceof Date) d = raw;
+          else if (typeof raw === "string")
+            d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(raw) ? `${raw}T12:00:00` : raw);
+          else d = new Date(raw ?? Date.now());
+
+          const localNoon = atLocalNoon(d);
+          const newTs = Timestamp.fromDate(localNoon);
           payload.date = newTs;
           payload.ym = toYMFromTimestamp(newTs);
         }
 
-        const clean = cleanUndefined({
-          ...payload,
-          updatedAt: serverTimestamp(),
-        });
-
+        const clean = cleanUndefined({ ...payload, updatedAt: serverTimestamp() });
         await updateDoc(doc(db, "couples", cid, "expenses", id), clean);
       },
 
@@ -492,15 +457,8 @@ export const useStore = create<Store>()(
       async deleteExpense(id, opts) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         const ref = doc(db, "couples", cid, "expenses", id);
-
-        if (opts?.hard) {
-          await deleteDoc(ref);
-        } else {
-          await updateDoc(ref, {
-            deleted: true,
-            updatedAt: serverTimestamp(),
-          });
-        }
+        if (opts?.hard) await deleteDoc(ref);
+        else await updateDoc(ref, { deleted: true, updatedAt: serverTimestamp() });
       },
 
       // ---------- RENDAS ----------
@@ -509,9 +467,9 @@ export const useStore = create<Store>()(
         await addDoc(collection(db, "couples", cid, "incomes"), {
           person: data.person,
           source: data.source,
-          amount: data.amount,                                  // centavos
-          ym: data.ym,                                          // "YYYY-MM"
-          date: Timestamp.fromDate(new Date(`${data.ym}-01T00:00:00`)), // 1º dia
+          amount: data.amount,
+          ym: data.ym,
+          date: Timestamp.fromDate(new Date(`${data.ym}-01T00:00:00`)),
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -537,7 +495,6 @@ export const useStore = create<Store>()(
       name: "tf-store",
       version: 1,
       storage: createJSONStorage(() => localStorage),
-      // ✅ NÃO persistimos 'couple' para evitar reidratar null antigo
       partialize: (s) => ({ profile: s.profile }),
       migrate: (p: any) => p,
     }

@@ -1,9 +1,8 @@
-// src/components/expenses/ExpenseList.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/store";
 import { fromCents } from "@/lib/currency";
 import { monthLabelPT } from "@/lib/date";
-import { Pencil, Trash2 } from "lucide-react"; // ✅ ícones
+import { Pencil, Trash2 } from "lucide-react";
 
 type Props = {
   ym: string; // YYYY-MM
@@ -35,6 +34,7 @@ export default function ExpenseList({ ym, onEdit }: Props) {
   const deleteExpense = useStore((s) => s.deleteExpense);
 
   const [q, setQ] = useState("");
+  const [collapsed, setCollapsed] = useState(true); // ✅ colapsado por padrão
   const inputRef = useRef<HTMLInputElement>(null);
 
   // atalho: "/" foca o campo
@@ -53,6 +53,11 @@ export default function ExpenseList({ ym, onEdit }: Props) {
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
   }, []);
+
+  // quando buscar, expande; ao limpar, volta a colapsar
+  useEffect(() => {
+    setCollapsed(q ? false : true);
+  }, [q]);
 
   const totalDoMes = useMemo(
     () =>
@@ -75,11 +80,17 @@ export default function ExpenseList({ ym, onEdit }: Props) {
     });
   }, [q, totalDoMes]);
 
+  // ✅ controla quantos itens aparecem (5 quando colapsado)
+  const visible = useMemo(
+    () => (collapsed ? filtered.slice(0, 5) : filtered),
+    [filtered, collapsed]
+  );
+
   const clear = () => setQ("");
 
   return (
     <div className="bg-slate-900 rounded-2xl">
-      {/* Cabeçalho com busca */}
+      {/* Cabeçalho com busca (esquerda) e contagem (direita) */}
       <div className="flex items-center gap-3 px-3 py-2 border-b border-slate-800">
         <div className="flex items-center gap-2 flex-1 min-w-0">
           <div className="relative flex-1">
@@ -97,6 +108,8 @@ export default function ExpenseList({ ym, onEdit }: Props) {
               <button
                 onClick={clear}
                 className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-2 py-1 bg-slate-700 rounded hover:bg-slate-600"
+                aria-label="Limpar busca"
+                title="Limpar (Esc)"
               >
                 Limpar
               </button>
@@ -105,13 +118,13 @@ export default function ExpenseList({ ym, onEdit }: Props) {
         </div>
 
         <div className="text-xs opacity-70 whitespace-nowrap">
-          {filtered.length} de {totalDoMes.length}
+          {visible.length} de {filtered.length}
         </div>
       </div>
 
       {/* Lista */}
       <ul className="divide-y divide-slate-800">
-        {filtered.map((e: any) => (
+        {visible.map((e: any) => (
           <li key={e.id} className="px-3 py-3 flex items-center gap-3">
             <div className="flex-1">
               <div className="font-medium">{e.title || "(sem título)"}</div>
@@ -125,7 +138,6 @@ export default function ExpenseList({ ym, onEdit }: Props) {
             </div>
 
             <div className="flex gap-2">
-              {/* Botão editar */}
               <button
                 className="p-1 rounded hover:bg-slate-700"
                 onClick={() => onEdit?.(e)}
@@ -133,8 +145,6 @@ export default function ExpenseList({ ym, onEdit }: Props) {
               >
                 <Pencil size={16} />
               </button>
-
-              {/* Botão excluir */}
               <button
                 className="p-1 rounded hover:bg-red-700 text-red-400"
                 onClick={async () => {
@@ -157,12 +167,24 @@ export default function ExpenseList({ ym, onEdit }: Props) {
           </li>
         ))}
 
-        {filtered.length === 0 && (
+        {visible.length === 0 && (
           <li className="px-3 py-6 text-center text-sm opacity-70">
-            Nenhuma despesa encontrada em {monthLabelPT(ym)} para “{q}”.
+            Nenhuma despesa encontrada em {monthLabelPT(ym)}{q ? ` para “${q}”` : ""}.
           </li>
         )}
       </ul>
+
+      {/* ✅ Toggle Mostrar todos / Ver menos */}
+      {!q && filtered.length > 5 && (
+        <div className="px-3 py-2 border-t border-slate-800">
+          <button
+            className="text-xs underline underline-offset-2 hover:text-emerald-400"
+            onClick={() => setCollapsed((s) => !s)}
+          >
+            {collapsed ? `Mostrar todos (${filtered.length - 5} mais)` : "Ver menos"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }
