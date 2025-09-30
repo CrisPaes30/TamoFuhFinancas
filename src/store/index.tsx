@@ -98,6 +98,7 @@ type Store = {
   addExpense: (data: Omit<Expense, "id" | "createdAt" | "updatedAt">) => Promise<void>;
   updateExpense: (id: string, data: Partial<Expense>) => Promise<void>;
   removeExpense: (id: string) => Promise<void>;
+  deleteExpense: (id: string, opts?: { hard?: boolean }) => Promise<void>; // ✅ novo
 
   addIncome: (data: Omit<Income, "id" | "createdAt" | "updatedAt" | "date">) => Promise<void>;
   updateIncome: (id: string, data: Partial<Income>) => Promise<void>;
@@ -486,6 +487,20 @@ export const useStore = create<Store>()(
       async removeExpense(id) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         await deleteDoc(doc(db, "couples", cid, "expenses", id));
+      },
+
+      async deleteExpense(id, opts) {
+        const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const ref = doc(db, "couples", cid, "expenses", id);
+
+        if (opts?.hard) {
+          await deleteDoc(ref);
+        } else {
+          await updateDoc(ref, {
+            deleted: true,
+            updatedAt: serverTimestamp(),
+          });
+        }
       },
 
       // ---------- RENDAS ----------

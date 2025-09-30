@@ -1,143 +1,168 @@
-import { useMemo, useState } from "react";
+// src/components/expenses/ExpenseList.tsx
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/store";
 import { fromCents } from "@/lib/currency";
-import { toMonth, toMillis, toYMD } from "@/lib/dateFmt";
+import { monthLabelPT } from "@/lib/date";
+import { Pencil, Trash2 } from "lucide-react"; // ✅ ícones
 
-type ExpenseListProps = {
-  ym?: string; // YYYY-MM para filtrar por mês
-  onEdit?: (e: any) => void; // callback para abrir o modal em modo edição
+type Props = {
+  ym: string; // YYYY-MM
+  onEdit?: (e: any) => void;
 };
 
-export default function ExpenseList({ ym, onEdit }: ExpenseListProps) {
-  const { expenses, removeExpense } = useStore();
-  const [showAll, setShowAll] = useState(false);
+function normalize(s: any): string {
+  if (s == null) return "";
+  return String(s)
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim();
+}
 
-  // filtra por mês, se informado
-  const monthFiltered = useMemo(() => {
-    const arr = expenses.filter((e) => !e.deleted);
-    return ym ? arr.filter((e) => (toMonth(e.date) || "").startsWith(ym)) : arr;
-  }, [expenses, ym]);
+function toYMD(d: any): string {
+  try {
+    if (!d) return "";
+    if (typeof d?.toDate === "function") return d.toDate().toISOString().slice(0, 10);
+    if (d instanceof Date) return d.toISOString().slice(0, 10);
+    if (typeof d === "string") return d.slice(0, 10);
+  } catch {}
+  return "";
+}
 
-  // ordena por data (desc), com fallback em createdAt
-  const items = useMemo(() => {
-    return [...monthFiltered].sort((a, b) => {
-      const da = toMillis(a.date) || toMillis(a.createdAt);
-      const db = toMillis(b.date) || toMillis(b.createdAt);
-      return db - da;
+export default function ExpenseList({ ym, onEdit }: Props) {
+  const currency = useStore((s) => s.couple?.currency ?? "BRL");
+  const expenses = useStore((s) => s.expenses ?? []);
+  const deleteExpense = useStore((s) => s.deleteExpense);
+
+  const [q, setQ] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // atalho: "/" foca o campo
+  useEffect(() => {
+    const h = (ev: KeyboardEvent) => {
+      if (
+        ev.key === "/" &&
+        document.activeElement !== inputRef.current &&
+        !(document.activeElement instanceof HTMLInputElement) &&
+        !(document.activeElement instanceof HTMLTextAreaElement)
+      ) {
+        ev.preventDefault();
+        inputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+
+  const totalDoMes = useMemo(
+    () =>
+      expenses.filter(
+        (e: any) => !e?.deleted && (e?.ym || toYMD(e?.date).slice(0, 7)) === ym
+      ),
+    [expenses, ym]
+  );
+
+  const filtered = useMemo(() => {
+    const nq = normalize(q);
+    if (!nq) return totalDoMes;
+
+    return totalDoMes.filter((e: any) => {
+      const title = normalize(e?.title);
+      const cat = normalize(e?.category);
+      const val = normalize((e?.amount ?? 0) / 100);
+      const d = normalize(toYMD(e?.date));
+      return title.includes(nq) || cat.includes(nq) || val.includes(nq) || d.includes(nq);
     });
-  }, [monthFiltered]);
+  }, [q, totalDoMes]);
 
-  const total = items.length;
-  const visible = showAll ? items : items.slice(0, 5);
-  const remaining = Math.max(0, total - 5);
-
-  async function handleDelete(id: string, title: string) {
-    const ok = window.confirm(`Excluir a despesa "${title}"?`);
-    if (!ok) return;
-    await removeExpense(id);
-  }
+  const clear = () => setQ("");
 
   return (
-    <div className="bg-slate-900 p-4 rounded-2xl">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="font-semibold">Despesas</h3>
-        {total > 0 && (
-          <span className="text-xs opacity-70">
-            {showAll ? `${total} itens` : `${Math.min(5, total)} de ${total}`}
-          </span>
-        )}
+    <div className="bg-slate-900 rounded-2xl">
+      {/* Cabeçalho com busca */}
+      <div className="flex items-center gap-3 px-3 py-2 border-b border-slate-800">
+        <div className="flex items-center gap-2 flex-1 min-w-0">
+          <div className="relative flex-1">
+            <input
+              ref={inputRef}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") clear();
+              }}
+              placeholder="Pesquisar despesa… ( / )"
+              className="w-full bg-slate-800/80 rounded px-3 py-2 pr-16 outline-none focus:ring-2 focus:ring-emerald-600/50"
+            />
+            {q && (
+              <button
+                onClick={clear}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs px-2 py-1 bg-slate-700 rounded hover:bg-slate-600"
+              >
+                Limpar
+              </button>
+            )}
+          </div>
+        </div>
+
+        <div className="text-xs opacity-70 whitespace-nowrap">
+          {filtered.length} de {totalDoMes.length}
+        </div>
       </div>
 
-      <ul className="grid gap-2">
-        {visible.map((e) => (
-          <li
-            key={e.id}
-            className="bg-slate-800 p-3 rounded flex items-center gap-3 justify-between"
-          >
-            <div className="min-w-0">
-              <div className="font-medium truncate">{e.title}</div>
-              <div className="text-xs opacity-80">
-                {toMillis(e.date)
-                  ? new Date(toMillis(e.date)).toLocaleDateString("pt-BR")
-                  : "—"}{" "}
-                • {e.category}
+      {/* Lista */}
+      <ul className="divide-y divide-slate-800">
+        {filtered.map((e: any) => (
+          <li key={e.id} className="px-3 py-3 flex items-center gap-3">
+            <div className="flex-1">
+              <div className="font-medium">{e.title || "(sem título)"}</div>
+              <div className="text-xs opacity-70">
+                {toYMD(e.date)} • {e.category || "Outros"}
               </div>
             </div>
 
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="font-semibold">{fromCents(e.amount)}</div>
+            <div className="text-right font-semibold">
+              {fromCents(e.amount ?? 0, currency)}
+            </div>
 
-              {/* Editar */}
+            <div className="flex gap-2">
+              {/* Botão editar */}
               <button
+                className="p-1 rounded hover:bg-slate-700"
                 onClick={() => onEdit?.(e)}
-                className="inline-flex items-center justify-center rounded-md bg-slate-700 hover:bg-slate-600 px-2 py-1 text-xs font-semibold text-white"
-                aria-label={`Editar ${e.title}`}
                 title="Editar"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
-                </svg>
+                <Pencil size={16} />
               </button>
 
-              {/* Excluir */}
+              {/* Botão excluir */}
               <button
-                onClick={() => handleDelete(e.id, e.title)}
-                className="inline-flex items-center justify-center rounded-md bg-red-600/80 hover:bg-red-600 px-2 py-1 text-xs font-semibold text-white"
-                aria-label={`Excluir ${e.title}`}
+                className="p-1 rounded hover:bg-red-700 text-red-400"
+                onClick={async () => {
+                  const ok = window.confirm(
+                    `Excluir a despesa "${e.title || "(sem título)"}"?`
+                  );
+                  if (!ok) return;
+                  try {
+                    await deleteExpense(e.id);
+                  } catch (err) {
+                    console.error(err);
+                    alert("Não foi possível excluir a despesa.");
+                  }
+                }}
                 title="Excluir"
               >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 24 24"
-                  className="h-4 w-4"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="3 6 5 6 21 6"></polyline>
-                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path>
-                  <path d="M10 11v6"></path>
-                  <path d="M14 11v6"></path>
-                  <path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"></path>
-                </svg>
+                <Trash2 size={16} />
               </button>
             </div>
           </li>
         ))}
+
+        {filtered.length === 0 && (
+          <li className="px-3 py-6 text-center text-sm opacity-70">
+            Nenhuma despesa encontrada em {monthLabelPT(ym)} para “{q}”.
+          </li>
+        )}
       </ul>
-
-      {total === 0 && (
-        <p className="opacity-70 mt-2">
-          {ym
-            ? "Sem despesas neste mês."
-            : "Sem despesas ainda. Adicione a primeira! 🍫"}
-        </p>
-      )}
-
-      {total > 5 && (
-        <div className="flex justify-center mt-3">
-          <button
-            className="text-sm px-3 py-1 rounded bg-slate-800 hover:bg-slate-700"
-            onClick={() => setShowAll((v) => !v)}
-          >
-            {showAll
-              ? "Mostrar menos"
-              : `Ver mais ${remaining > 0 ? `(${remaining})` : ""}`}
-          </button>
-        </div>
-      )}
     </div>
   );
 }
