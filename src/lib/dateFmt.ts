@@ -22,3 +22,11 @@ export function toMonth(d: unknown): string {
   const ymd = toYMD(d);
   return ymd ? ymd.slice(0, 7) : "";
 }
+
+export function monthOf(obj: any): string {
+  if (obj?.ym && typeof obj.ym === "string") return obj.ym;
+  const m = toMonth(obj?.date as Timestamp | Date | string);
+  if (m) return m;
+  if (obj?.month && typeof obj.month === "string") return obj.month;
+  return "";
+}

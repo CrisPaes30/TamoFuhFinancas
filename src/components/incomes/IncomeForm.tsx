@@ -6,8 +6,21 @@ import { toCents } from "@/utils";
 
 type Props = { open: boolean; onClose(): void };
 
+type IncomeVM = {
+  id: string;
+  person: "A" | "B";
+  source: string;
+  amount: number; // cents
+  month: string;  // YYYY-MM (campo virtual para filtro por mês)
+};
+
 export default function IncomeForm({ open, onClose }: Props) {
-  const { couple, setCouple } = useStore();
+  // ✨ pegue dados e ações corretas do store
+  const couple       = useStore((s) => s.couple);
+  const incomes      = useStore((s) => s.incomes ?? []);           // <- lista vinda do store
+  const addIncome    = useStore((s) => s.addIncome);               // <- ação para criar
+  const updateIncome = useStore((s) => s.updateIncome);            // <- ação para editar
+  const removeIncome = useStore((s) => s.removeIncome);            // <- ação para excluir
 
   const [idEditing, setIdEditing] = useState<string | null>(null);
   const [person, setPerson] = useState<"A" | "B">("A");
@@ -18,17 +31,17 @@ export default function IncomeForm({ open, onClose }: Props) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   });
 
-  type Income = {
-    id: string;
-    person: "A" | "B";
-    source: string;
-    amount: number; // cents
-    month: string;  // YYYY-MM
-  };
+  // Se suas rendas no store não tiverem "month/ym", você pode salvá-lo como campo "ym".
+  // Aqui, para listar por mês, tentamos ler "month" ou "ym".
+  const asVM = (incomes as any[]).map((i) => ({
+    id: i.id,
+    person: i.person,
+    source: i.source,
+    amount: i.amount,
+    month: i.ym ?? i.month ?? "", // <- primeiro tenta ym
+  }));
 
-  const incomes = (couple?.incomes || []) as Income[];
-
-  const monthList = incomes
+  const monthList = asVM
     .filter((i) => i.month === month)
     .sort((a, b) => b.amount - a.amount);
 
@@ -42,9 +55,7 @@ export default function IncomeForm({ open, onClose }: Props) {
     setAmount("");
     const d = new Date();
     setMonth(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
-    return () => {
-      document.body.style.overflow = prev;
-    };
+    return () => { document.body.style.overflow = prev; };
   }, [open]);
 
   if (!open || !couple) return null;
@@ -56,42 +67,43 @@ export default function IncomeForm({ open, onClose }: Props) {
     setAmount("");
   }
 
-  function saveIncome() {
+  async function saveIncome() {
     const cents = toCents(amount);
     if (cents <= 0) return;
-
-    const next = [...incomes];
+  
     if (idEditing) {
-      const idx = next.findIndex((i) => i.id === idEditing);
-      if (idx >= 0) next[idx] = { ...next[idx], person, source, amount: cents, month };
-    } else {
-      next.push({
-        id: crypto.randomUUID(),
+      await updateIncome(idEditing, {
         person,
         source: source.trim() || "Renda",
         amount: cents,
-        month,
+        ym: month,          // << AQUI
+      });
+    } else {
+      await addIncome({
+        person,
+        source: source.trim() || "Renda",
+        amount: cents,
+        ym: month,          // << AQUI
       });
     }
-    setCouple({ ...couple, incomes: next, updatedAt: Date.now() });
+  
     clearForm();
   }
 
   function editIncome(id: string) {
-    const it = incomes.find((i) => i.id === id);
+    const it = asVM.find((i) => i.id === id);
     if (!it) return;
     setIdEditing(it.id);
     setPerson(it.person);
     setSource(it.source);
-    setAmount((it.amount / 100).toFixed(2).replace(".", ","));
+    setAmount((it.amount / 100).toFixed(2).replace(".", ",")); // mantém seu formato
     setMonth(it.month);
   }
 
-  function removeIncome(id: string) {
+  async function removeIncomeUI(id: string) {
     const ok = window.confirm("Excluir esta renda?");
     if (!ok) return;
-    const next = incomes.filter((i) => i.id !== id);
-    setCouple({ ...couple, incomes: next, updatedAt: Date.now() });
+    await removeIncome(id);
     if (idEditing === id) clearForm();
   }
 
@@ -163,10 +175,7 @@ export default function IncomeForm({ open, onClose }: Props) {
             )}
             <ul className="grid gap-2">
               {monthList.map((i) => (
-                <li
-                  key={i.id}
-                  className="bg-slate-800 p-3 rounded flex items-center justify-between gap-3"
-                >
+                <li key={i.id} className="bg-slate-800 p-3 rounded flex items-center justify-between gap-3">
                   <div className="min-w-0">
                     <div className="font-medium truncate">
                       {i.source} • {i.person === "A" ? couple.nameA : couple.nameB}
@@ -174,19 +183,11 @@ export default function IncomeForm({ open, onClose }: Props) {
                     <div className="text-xs opacity-80">{i.month}</div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
-                    <div className="font-semibold">
-                      {fromCents(i.amount, couple.currency)}
-                    </div>
-                    <button
-                      className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded"
-                      onClick={() => editIncome(i.id)}
-                    >
+                    <div className="font-semibold">{fromCents(i.amount, couple.currency)}</div>
+                    <button className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded" onClick={() => editIncome(i.id)}>
                       Editar
                     </button>
-                    <button
-                      className="text-xs bg-red-600/80 hover:bg-red-600 px-2 py-1 rounded text-white"
-                      onClick={() => removeIncome(i.id)}
-                    >
+                    <button className="text-xs bg-red-600/80 hover:bg-red-600 px-2 py-1 rounded text-white" onClick={() => removeIncomeUI(i.id)}>
                       Excluir
                     </button>
                   </div>

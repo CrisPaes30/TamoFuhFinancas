@@ -4,46 +4,50 @@ import { useStore } from "@/store";
 import { fromCents } from "@/lib/currency";
 import { monthLabelPT } from "@/lib/date";
 import Bar from "@/components/stats/Bar";
-import { toMonth, toMillis, toYMD } from "@/lib/dateFmt";
+import { monthOf } from "@/lib/dateFmt";
 
 type Props = { ym: string };
 
 export default function StatsSection({ ym }: Props) {
-  const { expenses, couple } = useStore();
+  const expenses = useStore((s) => s.expenses ?? []);
+  const incomes  = useStore((s) => s.incomes ?? []);
+  const couple   = useStore((s) => s.couple);
 
   // despesas do mês selecionado
   const monthItems = useMemo(
-    () => expenses.filter((e) => !e.deleted && (toMonth(e.date) || "").startsWith(ym)),
+    () => expenses.filter((e) => !e.deleted && monthOf(e) === ym),
     [expenses, ym]
   );
+  const totalOut = monthItems.reduce((acc, e) => acc + (e.amount || 0), 0);
 
-  const totalOut = monthItems.reduce((acc, e) => acc + e.amount, 0);
-
-  // rendas do mês
-  const incomes = (couple?.incomes || []).filter((i: any) => i.month === ym);
-  const incomeA = incomes
+  // rendas do mês (AGORA pelo store + monthOf)
+  const monthIncomes = useMemo(
+    () => incomes.filter((i: any) => monthOf(i) === ym),
+    [incomes, ym]
+  );
+  const incomeA = monthIncomes
     .filter((i: any) => i.person === "A")
-    .reduce((s: number, i: any) => s + i.amount, 0);
-  const incomeB = incomes
+    .reduce((s: number, i: any) => s + (i.amount || 0), 0);
+  const incomeB = monthIncomes
     .filter((i: any) => i.person === "B")
-    .reduce((s: number, i: any) => s + i.amount, 0);
+    .reduce((s: number, i: any) => s + (i.amount || 0), 0);
+
   const totalIn = incomeA + incomeB;
   const saved = totalIn - totalOut;
 
   // por categoria (top 5)
   const catMap = new Map<string, number>();
   for (const e of monthItems)
-    catMap.set(e.category, (catMap.get(e.category) || 0) + e.amount);
+    catMap.set(e.category, (catMap.get(e.category) || 0) + (e.amount || 0));
   const catList = Array.from(catMap.entries())
     .sort((a, b) => b[1] - a[1])
     .slice(0, 5);
 
   // quem pagou
-  let paidA = 0,
-    paidB = 0;
+  let paidA = 0, paidB = 0;
   for (const e of monthItems) {
-    if (e.paidBy === "A") paidA += e.amount;
-    else paidB += e.amount;
+    if (e.paidBy === "A") paidA += e.amount || 0;
+    else paidB += e.amount || 0;
   }
 
   const maxBar = Math.max(totalIn, totalOut, 1);
@@ -57,14 +61,14 @@ export default function StatsSection({ ym }: Props) {
         <div className="text-sm mb-2 opacity-80">Renda x Despesas</div>
         <div className="grid gap-2">
           <Bar
-            label={`Renda ${couple?.nameA}`}
+            label={`Renda ${couple?.nameA || "Pessoa A"}`}
             value={incomeA}
             max={maxBar}
             color="bg-emerald-500"
             right={fromCents(incomeA, couple?.currency)}
           />
           <Bar
-            label={`Renda ${couple?.nameB}`}
+            label={`Renda ${couple?.nameB || "Pessoa B"}`}
             value={incomeB}
             max={maxBar}
             color="bg-emerald-400"
@@ -79,9 +83,7 @@ export default function StatsSection({ ym }: Props) {
           />
         </div>
         <div
-          className={`mt-2 text-sm ${
-            saved >= 0 ? "text-emerald-400" : "text-rose-400"
-          }`}
+          className={`mt-2 text-sm ${saved >= 0 ? "text-emerald-400" : "text-rose-400"}`}
         >
           {saved >= 0
             ? `Sobra: ${fromCents(saved, couple?.currency)}`

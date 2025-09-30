@@ -10,14 +10,17 @@ type Props = {
 };
 
 export default function InsightsSection({ ym }: Props) {
-  const { expenses, couple } = useStore();
+  // pegar tudo do store
+  const expenses = useStore((s) => s.expenses ?? []);
+  const incomes  = useStore((s) => s.incomes ?? []);
+  const couple   = useStore((s) => s.couple);
 
   const baseDate = new Date(`${ym}-01T00:00:00`);
   const months = lastMonthsYM(4, baseDate);
-  const incomes = (couple?.incomes || []) as any[];
 
+  // fatias (mês atual + anteriores) usando o helper que já considera ym/date/month
   const slices = months.map((m) => sliceByMonth(expenses, incomes, m));
-  const current = slices[0];
+  const current = slices[0]; // months[0] é o próprio ym
 
   const a = analyzeMonth(
     current,

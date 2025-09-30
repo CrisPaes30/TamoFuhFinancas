@@ -52,8 +52,9 @@ export type Income = {
   id: string;
   person: "A" | "B";
   source: string;
-  amount: number; // centavos
-  month: string;  // YYYY-MM
+  amount: number;   // centavos
+  ym: string;       // YYYY-MM
+  date: Timestamp;  // 1º dia do ym
   createdAt?: Timestamp;
   updatedAt?: Timestamp;
 };
@@ -96,7 +97,7 @@ type Store = {
   updateExpense: (id: string, data: Partial<Expense>) => Promise<void>;
   removeExpense: (id: string) => Promise<void>;
 
-  addIncome: (data: Omit<Income, "id" | "createdAt" | "updatedAt">) => Promise<void>;
+  addIncome: (data: Omit<Income, "id" | "createdAt" | "updatedAt" | "date">) => Promise<void>;
   updateIncome: (id: string, data: Partial<Income>) => Promise<void>;
   removeIncome: (id: string) => Promise<void>;
 };
@@ -224,7 +225,6 @@ export const useStore = create<Store>()(
         const prevCoupleId = prevProfile?.coupleId ?? null;
         const nextCoupleId = p?.coupleId ?? null;
 
-        // ✅ só retorna se NADA mudou e os listeners já estão ativos
         const listenersActive = !!(unsubCouple && unsubExpenses && unsubIncomes);
         if (shallowEqual(prevProfile, p) && prevCoupleId === nextCoupleId && listenersActive) return;
 
@@ -256,11 +256,9 @@ export const useStore = create<Store>()(
           set({ couple: { id: p.coupleId } });
         }
 
-        // ✅ rebind se cache trouxe couple=null ou se listeners não estão ativos
         const needRebindBecauseCache =
           !!p.coupleId && (get().couple === null || !listenersActive);
 
-        // já existia
         const needAttach = !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes);
 
         if (changedCouple || needAttach || needRebindBecauseCache) {
@@ -294,9 +292,9 @@ export const useStore = create<Store>()(
             // Expenses com fallback de índice
             attachExpensesListener(cid, (partial) => set(partial));
 
-            // Incomes
+            // Incomes (ordenado por date)
             const incRef = collection(db, "couples", cid, "incomes");
-            const incQ   = query(incRef, orderBy("month", "desc"));
+            const incQ   = query(incRef, orderBy("date", "desc"));
             try { unsubIncomes?.(); } catch {}
             unsubIncomes = onSnapshot(
               incQ,
@@ -479,7 +477,11 @@ export const useStore = create<Store>()(
       async addIncome(data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         await addDoc(collection(db, "couples", cid, "incomes"), {
-          ...data,
+          person: data.person,
+          source: data.source,
+          amount: data.amount,                                  // centavos
+          ym: data.ym,                                          // "YYYY-MM"
+          date: Timestamp.fromDate(new Date(`${data.ym}-01T00:00:00`)), // 1º dia
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -487,10 +489,13 @@ export const useStore = create<Store>()(
 
       async updateIncome(id, data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
-        await updateDoc(doc(db, "couples", cid, "incomes", id), {
-          ...data,
-          updatedAt: serverTimestamp(),
-        } as any);
+
+        const patch: any = { ...data, updatedAt: serverTimestamp() };
+        if (data.ym) {
+          patch.date = Timestamp.fromDate(new Date(`${data.ym}-01T00:00:00`));
+        }
+
+        await updateDoc(doc(db, "couples", cid, "incomes", id), patch);
       },
 
       async removeIncome(id) {
