@@ -67,6 +67,8 @@ export type Couple = {
   members?: string[];
   createdAt?: Timestamp | null;
   updatedAt?: Timestamp | null;
+  /** <- adicionado para refletir opções salvas */
+  categories?: string[] | null;
 };
 
 export type UserProfile = {
@@ -114,7 +116,18 @@ function shallowEqual(a: any, b: any) {
 function shallowCoupleEqual(a?: Couple | null, b?: Couple | null) {
   if (a === b) return true;
   if (!a || !b) return false;
-  return a.id === b.id && a.nameA === b.nameA && a.nameB === b.nameB && a.currency === b.currency;
+  const ac = a.categories ?? [];
+  const bc = b.categories ?? [];
+  const catsEq =
+    ac.length === bc.length &&
+    ac.every((v, i) => v === bc[i]);
+  return (
+    a.id === b.id &&
+    a.nameA === b.nameA &&
+    a.nameB === b.nameB &&
+    a.currency === b.currency &&
+    catsEq
+  );
 }
 
 /** ---------- Helpers de data ---------- */
@@ -283,6 +296,8 @@ export const useStore = create<Store>()(
                   currency: (data?.currency ?? null) as any,
                   createdAt: (data?.createdAt ?? null) as Timestamp | null,
                   updatedAt: (data?.updatedAt ?? null) as Timestamp | null,
+                  // <- refletir categorias salvas
+                  categories: (data?.categories ?? null) as string[] | null,
                 };
                 if (!shallowCoupleEqual(get().couple, next)) set({ couple: next });
               },
