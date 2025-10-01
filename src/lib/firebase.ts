@@ -2,7 +2,7 @@
 import { initializeApp, getApps } from "firebase/app";
 import {
   initializeFirestore,
-  memoryLocalCache,
+  persistentMultipleTabManager,
   persistentLocalCache,
   clearIndexedDbPersistence,
 } from "firebase/firestore";
@@ -14,6 +14,7 @@ import {
   signOut,
   setPersistence,
   browserLocalPersistence,
+  type User,
 } from "firebase/auth";
 
 /** ---------- Config das ENVs ---------- */
@@ -21,24 +22,26 @@ const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,        // ex: tamo-fuhh.appspot.com
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET, // ex: tamo-fuhh.appspot.com
   messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// fail-fast só nos campos essenciais; se não usar Storage, pode deixar vazio
+// fail-fast só nos campos essenciais
 for (const key of ["apiKey", "authDomain", "projectId", "appId", "messagingSenderId"]) {
   // @ts-ignore
   if (!firebaseConfig[key]) throw new Error(`Firebase env ${key} ausente/undefined`);
 }
 
 /** ---------- App singleton ---------- */
-const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
+export const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
 
-/** ---------- Firestore ---------- */
-const isDev = import.meta.env.DEV === true;
+/** ---------- Firestore (offline persistente + multi-aba) ---------- */
 export const db = initializeFirestore(app, {
-  localCache: isDev ? memoryLocalCache() : persistentLocalCache(),
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager(),
+    // cacheSizeBytes: 100 * 1024 * 1024, // opcional: 100MB
+  }),
 });
 
 /** ---------- Auth ---------- */
@@ -51,7 +54,7 @@ setPersistence(auth, browserLocalPersistence).catch((e) => {
 });
 
 /** ---------- Helpers ---------- */
-export function watchAuth(cb: (u: any) => void) {
+export function watchAuth(cb: (u: User | null) => void) {
   return onAuthStateChanged(auth, cb);
 }
 export async function signInGoogle() {

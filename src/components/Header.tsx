@@ -1,7 +1,8 @@
-// src/components/Header.tsx (exemplo)
+// src/components/Header.tsx
 import { logout } from "@/lib/firebase";
 import { useStore } from "@/store";
 import { devNukeAll } from "@/lib/firebase";
+import InstallButton from "@/components/pwa/InstallButton"; // 👈 importa sem { }
 
 export default function Header() {
   const couple = useStore((s) => s.couple);
@@ -20,9 +21,13 @@ export default function Header() {
         <button className="underline" onClick={logout}>
           sair
         </button>
-        <button onClick={() => devNukeAll()} className="text-xs opacity-70 underline">
-  Resetar ambiente (DEV)
-</button>
+        <button
+          onClick={() => devNukeAll()}
+          className="text-xs opacity-70 underline"
+        >
+          Resetar ambiente (DEV)
+        </button>
+        <InstallButton /> {/* 👈 botão de instalar aparece só se suportado */}
       </div>
     </header>
   );
