@@ -166,8 +166,9 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
     if (!couple) return;
 
     const cents = toCents(amount);
-    if (!Number.isFinite(cents) || cents < 0) {
+    if (!Number.isFinite(cents) || cents <= 0) {
       console.warn("[ExpenseForm] amount inválido:", amount, "→", cents);
+      alert("Digite um valor válido maior que zero.");
       return;
     }
 
