@@ -8,7 +8,7 @@ type Props = {
   };
   
   export default function Bar({ label, value, max, color, right }: Props) {
-    const pct = Math.max(4, Math.round((value / (max || 1)) * 100));
+    const pct = value <= 0 ? 0 : Math.max(4, Math.round((value / (max || 1)) * 100));
   
     return (
       <div className="w-full">
