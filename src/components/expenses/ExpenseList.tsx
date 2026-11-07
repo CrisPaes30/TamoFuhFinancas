@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useStore } from "@/store";
 import { fromCents } from "@/lib/currency";
 import { monthLabelPT } from "@/lib/date";
-import { Pencil, Trash2 } from "lucide-react";
+import { Pencil, Trash2, Lock } from "lucide-react";
 
 type Props = {
   ym: string; // YYYY-MM
@@ -32,6 +32,7 @@ export default function ExpenseList({ ym, onEdit }: Props) {
   const currency = useStore((s) => s.couple?.currency ?? "BRL");
   const expenses = useStore((s) => s.expenses ?? []);
   const deleteExpense = useStore((s) => s.deleteExpense);
+  const myUid = useStore((s) => s.profile?.uid);
 
   const [q, setQ] = useState("");
   const [collapsed, setCollapsed] = useState(true); // ✅ colapsado por padrão
@@ -124,7 +125,12 @@ export default function ExpenseList({ ym, onEdit }: Props) {
 
       {/* Lista */}
       <ul className="divide-y divide-slate-800">
-        {visible.map((e: any) => (
+        {visible.map((e: any) => {
+          // Só o autor (quem criou) edita/exclui. Dado legado sem createdBy
+          // (criado antes desta trava) ou sem sessão identificada: libera.
+          const canManage = !e.createdBy || !myUid || e.createdBy === myUid;
+
+          return (
           <li key={e.id} className="px-3 py-3 flex items-center gap-3">
             <div className="flex-1">
               <div className="font-medium">{e.title || "(sem título)"}</div>
@@ -138,34 +144,50 @@ export default function ExpenseList({ ym, onEdit }: Props) {
             </div>
 
             <div className="flex gap-2">
-              <button
-                className="p-1 rounded hover:bg-slate-700"
-                onClick={() => onEdit?.(e)}
-                title="Editar"
-              >
-                <Pencil size={16} />
-              </button>
-              <button
-                className="p-1 rounded hover:bg-red-700 text-red-400"
-                onClick={async () => {
-                  const ok = window.confirm(
-                    `Excluir a despesa "${e.title || "(sem título)"}"?`
-                  );
-                  if (!ok) return;
-                  try {
-                    await deleteExpense(e.id);
-                  } catch (err) {
-                    console.error(err);
-                    alert("Não foi possível excluir a despesa.");
-                  }
-                }}
-                title="Excluir"
-              >
-                <Trash2 size={16} />
-              </button>
+              {canManage ? (
+                <>
+                  <button
+                    className="p-1 rounded hover:bg-slate-700"
+                    onClick={() => onEdit?.(e)}
+                    title="Editar"
+                  >
+                    <Pencil size={16} />
+                  </button>
+                  <button
+                    className="p-1 rounded hover:bg-red-700 text-red-400"
+                    onClick={async () => {
+                      const ok = window.confirm(
+                        `Excluir a despesa "${e.title || "(sem título)"}"?`
+                      );
+                      if (!ok) return;
+                      try {
+                        await deleteExpense(e.id);
+                      } catch (err) {
+                        console.error(err);
+                        alert(
+                          err instanceof Error
+                            ? err.message
+                            : "Não foi possível excluir a despesa."
+                        );
+                      }
+                    }}
+                    title="Excluir"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </>
+              ) : (
+                <span
+                  className="p-1 text-slate-600"
+                  title="Somente quem criou esta despesa pode editá-la ou excluí-la"
+                >
+                  <Lock size={16} />
+                </span>
+              )}
             </div>
           </li>
-        ))}
+          );
+        })}
 
         {visible.length === 0 && (
           <li className="px-3 py-6 text-center text-sm opacity-70">

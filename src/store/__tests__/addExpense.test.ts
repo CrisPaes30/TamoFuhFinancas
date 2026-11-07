@@ -44,13 +44,22 @@ const CASAL_TESTE = {
   categories: [] as string[],
 };
 
+// "Ana" é quem está logada por padrão nos testes (sessão ativa real).
+const PROFILE_ANA = { uid: "uid-ana", displayName: "Ana", coupleId: CASAL_TESTE.id };
+const PROFILE_BRUNO = { uid: "uid-bruno", displayName: "Bruno", coupleId: CASAL_TESTE.id };
+
 let useStore: typeof import("@/store").useStore;
 
 beforeEach(async () => {
   vi.clearAllMocks();
   vi.resetModules();
   ({ useStore } = await import("@/store"));
-  useStore.setState({ couple: CASAL_TESTE as any, expenses: [], incomes: [], profile: null });
+  useStore.setState({
+    couple: CASAL_TESTE as any,
+    expenses: [],
+    incomes: [],
+    profile: PROFILE_ANA as any,
+  });
 });
 
 describe("Cenário #1 — Despesa simples 50/50", () => {
@@ -246,5 +255,101 @@ describe("Cenário #17 — Exclusão", () => {
     await useStore.getState().deleteExpense("doc_y", { hard: true });
     expect(deleteDocMock).toHaveBeenCalledTimes(1);
     expect(updateDocMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("Cenário — createdBy é carimbado em quem criou (autoria)", () => {
+  it("despesa simples grava createdBy com o uid de quem está logado", async () => {
+    await useStore.getState().addExpense({
+      title: "Bolacha",
+      amount: 1200,
+      paidBy: "A",
+      date: new Date(2026, 5, 10),
+      category: "Mercado",
+      split: { a: 1, b: 1 },
+    } as any);
+
+    expect(addDocMock.mock.calls[0][1].createdBy).toBe("uid-ana");
+  });
+
+  it("série fixa e série parcelada carimbam createdBy em TODAS as ocorrências", async () => {
+    await useStore.getState().addExpense({
+      title: "Água",
+      amount: 8000,
+      paidBy: "A",
+      date: new Date(2026, 5, 5),
+      category: "Moradia",
+      split: { a: 1, b: 1 },
+      isFixed: true,
+      fixedKind: "Agua",
+    } as any);
+
+    const docs = addDocMock.mock.calls.map((c) => c[1]);
+    expect(docs.every((d) => d.createdBy === "uid-ana")).toBe(true);
+  });
+
+  it("muda quem está logado (Bruno) → a próxima despesa criada é carimbada com o uid do Bruno", async () => {
+    useStore.setState({ profile: PROFILE_BRUNO as any });
+
+    await useStore.getState().addExpense({
+      title: "Cinema",
+      amount: 5000,
+      paidBy: "B",
+      date: new Date(2026, 5, 12),
+      category: "Lazer",
+      split: { a: 1, b: 1 },
+    } as any);
+
+    expect(addDocMock.mock.calls[0][1].createdBy).toBe("uid-bruno");
+  });
+});
+
+describe("Cenário — só o autor pode editar/excluir (assertIsAuthor)", () => {
+  it("Bruno NÃO pode editar uma despesa que a Ana criou", async () => {
+    useStore.setState({
+      expenses: [{ id: "doc_1", createdBy: "uid-ana" } as any],
+      profile: PROFILE_BRUNO as any,
+    });
+
+    await expect(
+      useStore.getState().updateExpense("doc_1", { amount: 999 } as any)
+    ).rejects.toThrow(/apenas quem criou/i);
+    expect(updateDocMock).not.toHaveBeenCalled();
+  });
+
+  it("Bruno NÃO pode excluir uma despesa que a Ana criou", async () => {
+    useStore.setState({
+      expenses: [{ id: "doc_1", createdBy: "uid-ana" } as any],
+      profile: PROFILE_BRUNO as any,
+    });
+
+    await expect(useStore.getState().deleteExpense("doc_1")).rejects.toThrow(
+      /apenas quem criou/i
+    );
+    expect(updateDocMock).not.toHaveBeenCalled();
+    expect(deleteDocMock).not.toHaveBeenCalled();
+  });
+
+  it("Ana PODE editar/excluir a própria despesa", async () => {
+    useStore.setState({
+      expenses: [{ id: "doc_1", createdBy: "uid-ana" } as any],
+      profile: PROFILE_ANA as any,
+    });
+
+    await useStore.getState().updateExpense("doc_1", { amount: 999 } as any);
+    expect(updateDocMock).toHaveBeenCalledTimes(1);
+
+    await useStore.getState().deleteExpense("doc_1");
+    expect(updateDocMock).toHaveBeenCalledTimes(2); // soft delete também é updateDoc
+  });
+
+  it("dado legado sem createdBy não bloqueia ninguém (fail-open)", async () => {
+    useStore.setState({
+      expenses: [{ id: "doc_legado" } as any], // sem createdBy
+      profile: PROFILE_BRUNO as any,
+    });
+
+    await useStore.getState().updateExpense("doc_legado", { amount: 10 } as any);
+    expect(updateDocMock).toHaveBeenCalledTimes(1);
   });
 });

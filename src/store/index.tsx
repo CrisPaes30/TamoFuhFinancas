@@ -45,6 +45,9 @@ export type Expense = {
   groupId?: string;
   ruleKind?: "fixed" | "installments";
   generated?: boolean;
+
+  /** uid de quem criou o registro — usado para restringir edição/exclusão ao autor. */
+  createdBy?: string;
 };
 
 export type Income = {
@@ -155,6 +158,30 @@ function centsSplitEqually(total: number, parts: number): number[] {
   const sobra = total - base * parts;
   return Array.from({ length: parts }, (_, i) => base + (i < sobra ? 1 : 0));
 }
+/**
+ * Só o autor (quem criou) pode editar/excluir uma despesa.
+ * ⚠️ Isto é um checker client-side (best-effort): não substitui regra de
+ * segurança no Firestore. Alguém manipulando a chamada diretamente (fora
+ * da UI) ainda poderia burlar — a trava real precisa estar nas Firestore
+ * Security Rules (fora do escopo deste repositório).
+ * Falha "aberta" (não bloqueia) quando não há dado suficiente pra decidir:
+ * expense não encontrada localmente, sem createdBy (dado legado) ou sem
+ * profile carregado — nesses casos preferimos não travar o usuário.
+ */
+function assertIsAuthor(
+  expenses: Expense[],
+  profile: UserProfile | null,
+  id: string,
+  action: "editar" | "excluir"
+) {
+  const existing = expenses.find((e) => e.id === id);
+  if (!existing?.createdBy) return; // dado legado ou não carregado: não bloqueia
+  if (!profile?.uid) return; // sem sessão identificada: não bloqueia
+  if (existing.createdBy !== profile.uid) {
+    throw new Error(`Apenas quem criou esta despesa pode ${action}-la.`);
+  }
+}
+
 function uuid(): string {
   return (globalThis as any)?.crypto?.randomUUID?.() ??
     `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
@@ -335,6 +362,7 @@ export const useStore = create<Store>()(
       // ---------- DESPESAS ----------
       async addExpense(data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const createdBy = get().profile?.uid;
         const rawDate = (data as any).date;
 
         const normalizedDate =
@@ -379,6 +407,7 @@ export const useStore = create<Store>()(
               groupId: gid,
               generated: i > 0,
               deleted: data.deleted ?? false,
+              createdBy,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
@@ -402,6 +431,7 @@ export const useStore = create<Store>()(
               groupId: gid,
               generated: i > 0,
               deleted: data.deleted ?? false,
+              createdBy,
               createdAt: serverTimestamp(),
               updatedAt: serverTimestamp(),
             });
@@ -417,6 +447,7 @@ export const useStore = create<Store>()(
           installments: data.isCard ? Math.max(1, data.installments ?? 1) : 1,
           fixedKind: data.isFixed ? data.fixedKind : undefined,
           deleted: data.deleted ?? false,
+          createdBy,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -425,6 +456,7 @@ export const useStore = create<Store>()(
 
       async updateExpense(id, data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        assertIsAuthor(get().expenses, get().profile, id, "editar");
         const payload: any = { ...data };
 
         if ("ym" in payload) delete payload.ym; // derive sempre
@@ -456,6 +488,7 @@ export const useStore = create<Store>()(
 
       async deleteExpense(id, opts) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        assertIsAuthor(get().expenses, get().profile, id, "excluir");
         const ref = doc(db, "couples", cid, "expenses", id);
         if (opts?.hard) await deleteDoc(ref);
         else await updateDoc(ref, { deleted: true, updatedAt: serverTimestamp() });

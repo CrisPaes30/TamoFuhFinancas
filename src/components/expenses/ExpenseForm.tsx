@@ -186,7 +186,12 @@ export default function ExpenseForm({ open, onClose, editing }: Props) {
       title: title.trim(),
       amount: cents,
       paidBy,
-      date: Timestamp.fromDate(new Date(date)),
+      // "date" é "YYYY-MM-DD" (input type=date). new Date(date) sozinho é
+      // interpretado como UTC 00:00 pelo JS — em fusos negativos (ex.:
+      // America/Sao_Paulo, UTC-3) isso recua pro dia/mês anterior (bug: dia 1
+      // de um mês era gravado como dia 30/31 do mês ANTERIOR). Forçar meio-dia
+      // local faz o parser tratar como horário local, não UTC.
+      date: Timestamp.fromDate(new Date(`${date}T12:00:00`)),
       category: finalCategory,
       split: {
         a: Number.isFinite(splitA) ? Math.max(0, splitA) : 0,
