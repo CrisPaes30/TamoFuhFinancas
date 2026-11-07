@@ -24,3 +24,8 @@ dist-ssr
 *.sw?
 .vercel
 .env*.local
+
+# Playwright (sessão/credenciais de login, nunca comitar)
+playwright/.auth
+playwright-report
+test-results
