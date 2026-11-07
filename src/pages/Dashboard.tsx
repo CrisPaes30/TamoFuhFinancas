@@ -10,21 +10,22 @@ import IncomeForm from "@/components/incomes/IncomeForm";
 import StatsSection from "@/components/stats/StatsSection";
 import InsightsSection from "@/components/stats/InsightsSection";
 import ShareInviteBar from "@/components/invite/ShareInviteBar";
-import { Timestamp } from "firebase/firestore";
+import SettleRangeModal from "@/components/settlement/SettleRangeModal";
+import SettlementBanner from "@/components/settlement/SettlementBanner";
 
 export default function Dashboard() {
   const couple = useStore((s) => s.couple);
   const expenses = useStore((s) => s.expenses ?? []);
-  const addExpense = useStore((s) => s.addExpense);
+  const settlements = useStore((s) => s.settlements ?? []);
   const deleteExpense = useStore((s) => s.deleteExpense); // ✅
 
   const [openForm, setOpenForm] = useState(false);
   const [openIncome, setOpenIncome] = useState(false);
+  const [openSettle, setOpenSettle] = useState(false);
   const [selectedMonth, setSelectedMonth] = useState(getCurrentYM());
   const [editing, setEditing] = useState<any | null>(null);
 
   const [showDetails, setShowDetails] = useState(false);
-  const [settling, setSettling] = useState(false);
 
   if (couple === undefined) {
     return <div className="p-4 text-sm text-slate-300">Carregando casal…</div>;
@@ -143,30 +144,27 @@ export default function Dashboard() {
     return items;
   }, [monthExpenses, saldoA]);
 
-  async function settleBalance() {
-    if (settling || saldoA === 0) return;
-    setSettling(true);
-    try {
-      const value = Math.abs(saldoA);
-      const debtorIsB = saldoA > 0;
+  // Período (início/fim) do mês selecionado — default do popup de proposta e
+  // também usado pra saber se já existe acerto ativo cobrindo este mês.
+  const { monthStart, monthEnd } = useMemo(() => {
+    const [y, m] = selectedMonth.split("-").map(Number);
+    const lastDay = new Date(y, m, 0).getDate();
+    return {
+      monthStart: `${selectedMonth}-01`,
+      monthEnd: `${selectedMonth}-${String(lastDay).padStart(2, "0")}`,
+    };
+  }, [selectedMonth]);
 
-      const expense = {
-        title: `Acerto — ${labelMes}`,
-        amount: value,
-        paidBy: debtorIsB ? "B" : "A",
-        category: "Acerto",
-        split: debtorIsB ? { a: 100, b: 0 } : { a: 0, b: 100 },
-        date: Timestamp.now(),
-        ym: selectedMonth,
-        isFixed: false as const,
-      };
-
-      await addExpense(expense as any);
-      setShowDetails(true);
-    } finally {
-      setSettling(false);
-    }
-  }
+  const hasActiveSettlementForMonth = useMemo(
+    () =>
+      settlements.some(
+        (s) =>
+          (s.status === "pending" || s.status === "contested") &&
+          s.periodStart <= monthEnd &&
+          s.periodEnd >= monthStart
+      ),
+    [settlements, monthStart, monthEnd]
+  );
 
   async function undoSettlement() {
     if (!settlementExpense) return;
@@ -237,13 +235,15 @@ export default function Dashboard() {
             )}
 
             <div className="mt-3 flex gap-2 flex-wrap">
-              <button
-                className="bg-slate-800 px-3 py-2 rounded disabled:opacity-50"
-                disabled={saldoA === 0 || settling}
-                onClick={settleBalance}
-              >
-                {settling ? "Acertando..." : "Acertar agora"}
-              </button>
+              {!hasActiveSettlementForMonth && (
+                <button
+                  className="bg-slate-800 px-3 py-2 rounded disabled:opacity-50"
+                  disabled={saldoA === 0}
+                  onClick={() => setOpenSettle(true)}
+                >
+                  Acertar agora
+                </button>
+              )}
 
               {settlementExpense && (
                 <button
@@ -265,6 +265,8 @@ export default function Dashboard() {
         </div>
       </div>
 
+      <SettlementBanner />
+
       <ExpenseForm
         open={openForm || !!editing}
         editing={editing}
@@ -274,6 +276,12 @@ export default function Dashboard() {
         }}
       />
       <IncomeForm open={openIncome} onClose={() => setOpenIncome(false)} />
+      <SettleRangeModal
+        open={openSettle}
+        onClose={() => setOpenSettle(false)}
+        defaultStart={monthStart}
+        defaultEnd={monthEnd}
+      />
 
       <div className="flex justify-end">
         <button

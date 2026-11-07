@@ -13,8 +13,11 @@ import {
   updateDoc,
   Timestamp,
   arrayUnion,
+  runTransaction,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
+import { toYMD } from "@/lib/dateFmt";
+import { computeSettlementForPeriod, isWithinPeriod } from "@/settlement";
 
 function cleanUndefined<T extends Record<string, any>>(obj: T): T {
   const out: any = {};
@@ -79,12 +82,60 @@ export type UserProfile = {
   coupleId?: string | null;
 };
 
+/**
+ * Acerto de período (proposta de fechar um mês/intervalo e o devedor
+ * acertar a conta com o outro). Não guardamos "proposedBy" como A/B porque
+ * não existe no modelo de dados um mapeamento uid->A/B (couple.members é só
+ * um array de uids); guardamos o uid de quem propôs/respondeu e exibimos
+ * pelo nome denormalizado (proposedByName/byName) — a UI decide "sou eu ou
+ * é o outro" comparando com profile.uid, sem precisar resolver letra.
+ * `debtor` continua usando a mesma convenção "A"|"B" já usada em
+ * paidBy/split no resto do app (rótulo de formulário, não identidade).
+ */
+export type SettlementStatus = "pending" | "contested" | "closed" | "cancelled";
+
+export type SettlementResponseAction = "propose" | "agree" | "contest" | "cancel";
+
+export type SettlementResponse = {
+  by: string; // uid
+  byName?: string | null;
+  action: SettlementResponseAction;
+  note?: string;
+  at: Timestamp;
+};
+
+export type SettlementItem = {
+  expenseId: string;
+  title: string;
+  date: string; // YYYY-MM-DD
+  category: string;
+  amount: number; // centavos
+};
+
+export type Settlement = {
+  id: string;
+  periodStart: string; // YYYY-MM-DD
+  periodEnd: string;   // YYYY-MM-DD
+  status: SettlementStatus;
+  proposedBy: string; // uid
+  proposedByName?: string | null;
+  debtor: "A" | "B";
+  amount: number; // centavos, calculado (congelado) no momento da proposta
+  snapshot: SettlementItem[]; // itens que compuseram o cálculo, congelados
+  responses: SettlementResponse[];
+  createdAt?: Timestamp;
+  updatedAt?: Timestamp;
+  closedAt?: Timestamp;
+  resultExpenseId?: string; // id da despesa "Acerto" gerada quando fechado
+};
+
 /** ---------- Estado & Ações ---------- */
 type Store = {
   couple: Couple | null | undefined;
   profile: UserProfile | null;
   expenses: Expense[];
   incomes: Income[];
+  settlements: Settlement[];
 
   setProfile: (p: UserProfile | null) => void;
   mergeCouple: (partial: Partial<Couple> | null) => void;
@@ -104,6 +155,16 @@ type Store = {
   addIncome: (data: Omit<Income, "id" | "createdAt" | "updatedAt" | "date">) => Promise<void>;
   updateIncome: (id: string, data: Partial<Income>) => Promise<void>;
   removeIncome: (id: string) => Promise<void>;
+
+  // ---------- ACERTOS ----------
+  /** Calcula (sem gravar nada) o saldo de um período livre — usado na preview do popup "Acertar". */
+  previewSettlement: (periodStart: string, periodEnd: string) => ReturnType<typeof computeSettlementForPeriod>;
+  /** Cria a proposta de acerto (status "pending"), com snapshot congelado do cálculo atual. */
+  proposeSettlement: (input: { periodStart: string; periodEnd: string }) => Promise<string>;
+  /** O outro membro responde: concorda (gera a despesa de Acerto e fecha) ou contesta (com nota). */
+  respondSettlement: (id: string, action: "agree" | "contest", note?: string) => Promise<void>;
+  /** Só quem propôs pode cancelar, e só antes de fechado. */
+  cancelSettlement: (id: string) => Promise<void>;
 };
 
 /** ---------- Utils ---------- */
@@ -182,6 +243,46 @@ function assertIsAuthor(
   }
 }
 
+/**
+ * Enquanto um acerto (settlement) estiver ativo (qualquer status exceto
+ * "cancelled") cobrindo a data de uma despesa, ninguém pode editar/excluir
+ * essa despesa — nem o autor. Trava desde o momento da PROPOSTA (não só
+ * quando fechado), pra não mudar os números debaixo do pé de quem está
+ * revisando/negociando o acerto. Mesma filosofia fail-open das outras
+ * guardas: se não achar a despesa localmente, não bloqueia.
+ */
+function isDateLocked(settlements: Settlement[], dateYMD: string): boolean {
+  return settlements.some(
+    (s) => s.status !== "cancelled" && isWithinPeriod(dateYMD, s.periodStart, s.periodEnd)
+  );
+}
+
+function assertPeriodNotLocked(
+  expenses: Expense[],
+  settlements: Settlement[],
+  id: string,
+  action: "editar" | "excluir"
+) {
+  const existing = expenses.find((e) => e.id === id);
+  if (!existing) return;
+  if (isDateLocked(settlements, toYMD(existing.date))) {
+    throw new Error(
+      `Não é possível ${action} esta despesa: o período dela está em negociação ou já foi fechado num acerto.`
+    );
+  }
+}
+
+/** Mesma trava, mas para uma despesa NOVA (ainda sem id) — usada em addExpense,
+ * pra impedir inserir dado novo dentro de um período já em negociação/fechado
+ * (senão o snapshot já congelado do acerto fica "cego" pra esse novo gasto). */
+function assertNewExpenseDateNotLocked(settlements: Settlement[], dateYMD: string) {
+  if (isDateLocked(settlements, dateYMD)) {
+    throw new Error(
+      "Não é possível lançar despesa nesta data: o período está em negociação ou já foi fechado num acerto."
+    );
+  }
+}
+
 function uuid(): string {
   return (globalThis as any)?.crypto?.randomUUID?.() ??
     `gid_${Math.random().toString(36).slice(2)}_${Date.now()}`;
@@ -195,11 +296,13 @@ function atLocalNoon(d: Date): Date {
 let unsubCouple: null | (() => void) = null;
 let unsubExpenses: null | (() => void) = null;
 let unsubIncomes: null | (() => void) = null;
+let unsubSettlements: null | (() => void) = null;
 
 function clearListeners() {
   try { unsubCouple?.(); } finally { unsubCouple = null; }
   try { unsubExpenses?.(); } finally { unsubExpenses = null; }
   try { unsubIncomes?.(); } finally { unsubIncomes = null; }
+  try { unsubSettlements?.(); } finally { unsubSettlements = null; }
 }
 
 /** ---------- Self-heal de membresia ---------- */
@@ -261,20 +364,21 @@ export const useStore = create<Store>()(
       couple: undefined,
       expenses: [] as Expense[],
       incomes: [] as Income[],
+      settlements: [] as Settlement[],
 
       setProfile: (p) => {
         const prevProfile = get().profile;
         const prevCoupleId = prevProfile?.coupleId ?? null;
         const nextCoupleId = p?.coupleId ?? null;
 
-        const listenersActive = !!(unsubCouple && unsubExpenses && unsubIncomes);
+        const listenersActive = !!(unsubCouple && unsubExpenses && unsubIncomes && unsubSettlements);
         if (shallowEqual(prevProfile, p) && prevCoupleId === nextCoupleId && listenersActive) return;
 
         const changedCouple = prevCoupleId !== nextCoupleId;
 
         if (changedCouple || !p) {
           clearListeners();
-          set({ expenses: [] as Expense[], incomes: [] as Income[] });
+          set({ expenses: [] as Expense[], incomes: [] as Income[], settlements: [] as Settlement[] });
         }
 
         if (!p) {
@@ -302,7 +406,7 @@ export const useStore = create<Store>()(
           !!p.coupleId && (get().couple === null || !listenersActive);
 
         const needAttach =
-          !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes);
+          !!p.coupleId && (!unsubCouple || !unsubExpenses || !unsubIncomes || !unsubSettlements);
 
         if (changedCouple || needAttach || needRebindBecauseCache) {
           const cid = p.coupleId!;
@@ -315,7 +419,7 @@ export const useStore = create<Store>()(
               cRef,
               (snap) => {
                 if (!snap.exists()) {
-                  if (get().couple !== null) set({ couple: null, expenses: [] as Expense[], incomes: [] as Income[] });
+                  if (get().couple !== null) set({ couple: null, expenses: [] as Expense[], incomes: [] as Income[], settlements: [] as Settlement[] });
                   return;
                 }
                 const data = snap.data() as any;
@@ -348,6 +452,19 @@ export const useStore = create<Store>()(
               },
               (err) => console.error("[incomes] onSnapshot error:", err)
             );
+
+            // Settlements (acertos)
+            const settlRef = collection(db, "couples", cid, "settlements");
+            const settlQ = query(settlRef, orderBy("createdAt", "desc"));
+            try { unsubSettlements?.(); } catch {}
+            unsubSettlements = onSnapshot(
+              settlQ,
+              (snap) => {
+                const list: Settlement[] = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+                set({ settlements: list });
+              },
+              (err) => console.error("[settlements] onSnapshot error:", err)
+            );
           });
         }
       },
@@ -375,6 +492,8 @@ export const useStore = create<Store>()(
                     ? new Date(/^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? `${rawDate}T12:00:00` : rawDate)
                     : atLocalNoon(new Date(rawDate ?? Date.now()))
               );
+
+        assertNewExpenseDateNotLocked(get().settlements, toYMD(normalizedDate));
 
         const ymStart = toYMFromTimestamp(normalizedDate);
 
@@ -457,6 +576,7 @@ export const useStore = create<Store>()(
       async updateExpense(id, data) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         assertIsAuthor(get().expenses, get().profile, id, "editar");
+        assertPeriodNotLocked(get().expenses, get().settlements, id, "editar");
         const payload: any = { ...data };
 
         if ("ym" in payload) delete payload.ym; // derive sempre
@@ -489,6 +609,7 @@ export const useStore = create<Store>()(
       async deleteExpense(id, opts) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         assertIsAuthor(get().expenses, get().profile, id, "excluir");
+        assertPeriodNotLocked(get().expenses, get().settlements, id, "excluir");
         const ref = doc(db, "couples", cid, "expenses", id);
         if (opts?.hard) await deleteDoc(ref);
         else await updateDoc(ref, { deleted: true, updatedAt: serverTimestamp() });
@@ -522,6 +643,178 @@ export const useStore = create<Store>()(
       async removeIncome(id) {
         const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
         await deleteDoc(doc(db, "couples", cid, "incomes", id));
+      },
+
+      // ---------- ACERTOS ----------
+      previewSettlement(periodStart, periodEnd) {
+        return computeSettlementForPeriod(get().expenses, periodStart, periodEnd);
+      },
+
+      async proposeSettlement({ periodStart, periodEnd }) {
+        const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const uid = get().profile?.uid; if (!uid) throw new Error("Sem sessão.");
+        const displayName = get().profile?.displayName ?? null;
+
+        const jaAtivo = get().settlements.find(
+          (s) =>
+            s.periodStart === periodStart &&
+            s.periodEnd === periodEnd &&
+            s.status !== "cancelled" &&
+            s.status !== "closed"
+        );
+        if (jaAtivo) {
+          throw new Error("Já existe uma proposta de acerto em andamento para este período.");
+        }
+
+        const calc = computeSettlementForPeriod(get().expenses, periodStart, periodEnd);
+        if (calc.debtor === null) {
+          throw new Error("Não há diferença a acertar neste período.");
+        }
+
+        const firstResponse = cleanUndefined({
+          by: uid,
+          byName: displayName,
+          action: "propose" as const,
+          at: Timestamp.now(),
+        });
+
+        const docData = cleanUndefined({
+          periodStart,
+          periodEnd,
+          status: "pending" as const,
+          proposedBy: uid,
+          proposedByName: displayName,
+          debtor: calc.debtor,
+          amount: calc.amount,
+          snapshot: calc.items,
+          responses: [firstResponse],
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        const ref = await addDoc(collection(db, "couples", cid, "settlements"), docData as any);
+        return ref.id;
+      },
+
+      async respondSettlement(id, action, note) {
+        const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const uid = get().profile?.uid; if (!uid) throw new Error("Sem sessão.");
+        const displayName = get().profile?.displayName ?? null;
+
+        const existing = get().settlements.find((s) => s.id === id);
+        if (!existing) throw new Error("Proposta de acerto não encontrada.");
+        if (existing.proposedBy === uid) {
+          throw new Error("Quem propôs o acerto não pode responder à própria proposta.");
+        }
+        if (existing.status !== "pending" && existing.status !== "contested") {
+          throw new Error("Esta proposta já foi encerrada.");
+        }
+
+        const ref = doc(db, "couples", cid, "settlements", id);
+        const responseEntry = cleanUndefined({
+          by: uid,
+          byName: displayName,
+          action,
+          note,
+          at: Timestamp.now(),
+        });
+
+        if (action === "agree") {
+          // Gerar a despesa de Acerto + fechar a proposta precisa ser ATÔMICO:
+          // duas escritas soltas (addDoc + updateDoc) deixariam uma janela em
+          // que uma falha de rede no meio cria a despesa mas não fecha a
+          // proposta (ou vice-versa) — e um retry/duplo-clique geraria uma
+          // segunda despesa de Acerto. runTransaction garante tudo-ou-nada, e
+          // de brinde reconfere o status "ao vivo" no servidor (protege contra
+          // responder duas vezes em paralelo).
+          const expenseId = uuid();
+          const expenseRef = doc(db, "couples", cid, "expenses", expenseId);
+
+          await runTransaction(db, async (tx) => {
+            const freshSnap = await tx.get(ref);
+            if (!freshSnap.exists()) throw new Error("Proposta de acerto não encontrada.");
+            const fresh = freshSnap.data() as any;
+            if (fresh.status !== "pending" && fresh.status !== "contested") {
+              throw new Error("Esta proposta já foi encerrada.");
+            }
+
+            // meio-dia local, igual toda outra despesa do app — evita o
+            // mesmo bug de fuso horário já corrigido em ExpenseForm (um
+            // acerto feito tarde da noite não pode "vazar" pro dia seguinte).
+            const now = Timestamp.fromDate(atLocalNoon(new Date()));
+            const expenseDocData = cleanUndefined({
+              title: `Acerto — ${existing.periodStart} a ${existing.periodEnd}`,
+              amount: existing.amount,
+              paidBy: existing.debtor,
+              category: "Acerto",
+              split: existing.debtor === "B" ? { a: 0, b: 1 } : { a: 1, b: 0 },
+              date: now,
+              ym: toYMFromTimestamp(now),
+              isFixed: false,
+              isCard: false,
+              installments: 1,
+              deleted: false,
+              createdBy: uid,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+
+            tx.set(expenseRef, expenseDocData as any);
+            tx.update(
+              ref,
+              cleanUndefined({
+                status: "closed",
+                responses: arrayUnion(responseEntry),
+                resultExpenseId: expenseId,
+                closedAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              })
+            );
+          });
+          return;
+        }
+
+        // contest
+        await updateDoc(
+          ref,
+          cleanUndefined({
+            status: "contested",
+            responses: arrayUnion(responseEntry),
+            updatedAt: serverTimestamp(),
+          })
+        );
+      },
+
+      async cancelSettlement(id) {
+        const cid = get().couple?.id; if (!cid) throw new Error("Sem casal.");
+        const uid = get().profile?.uid; if (!uid) throw new Error("Sem sessão.");
+        const displayName = get().profile?.displayName ?? null;
+
+        const existing = get().settlements.find((s) => s.id === id);
+        if (!existing) throw new Error("Proposta de acerto não encontrada.");
+        if (existing.proposedBy !== uid) {
+          throw new Error("Só quem propôs o acerto pode cancelá-lo.");
+        }
+        if (existing.status === "closed") {
+          throw new Error("Esta proposta já foi fechada e não pode mais ser cancelada.");
+        }
+
+        const ref = doc(db, "couples", cid, "settlements", id);
+        const responseEntry = cleanUndefined({
+          by: uid,
+          byName: displayName,
+          action: "cancel" as const,
+          at: Timestamp.now(),
+        });
+
+        await updateDoc(
+          ref,
+          cleanUndefined({
+            status: "cancelled",
+            responses: arrayUnion(responseEntry),
+            updatedAt: serverTimestamp(),
+          })
+        );
       },
     }),
     {
