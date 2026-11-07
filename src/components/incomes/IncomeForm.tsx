@@ -1,8 +1,7 @@
 // src/components/incomes/IncomeForm.tsx
 import { useEffect, useState } from "react";
 import { useStore } from "@/store";
-import { fromCents } from "@/lib/currency";
-import { toCents } from "@/utils";
+import { fromCents, toCents } from "@/lib/currency";
 
 type Props = { open: boolean; onClose(): void };
 

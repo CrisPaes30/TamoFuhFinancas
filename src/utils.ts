@@ -1,13 +1,8 @@
-export const toCents = (s: string) => {
-  if (!s) return 0;
-  const normalized = s.replace(".", "").replace(",", ".");
-  const v = Number.parseFloat(normalized);
-  return Math.round((Number.isFinite(v) ? v : 0) * 100);
-};
-export const fromCents = (v: number, currency = "BRL") =>
-  new Intl.NumberFormat("pt-BR", { style: "currency", currency }).format(
-    v / 100
-  );
+// toCents/fromCents viviam duplicados aqui e em @/lib/currency, com uma
+// divergência sutil (esta versão só removia o 1º separador de milhar,
+// quebrando valores como "1.234.567,89"). Unificado: @/lib/currency é a
+// implementação canônica; reexportamos para não quebrar quem importa daqui.
+export { toCents, fromCents } from "@/lib/currency";
 
 export const computeShares = (
   amount: number,

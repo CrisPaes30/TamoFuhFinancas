@@ -3,27 +3,22 @@ import { describe, it, expect } from "vitest";
 import { toCents, computeShares } from "@/utils";
 import { toCents as toCentsLib } from "@/lib/currency";
 
-describe("utils.toCents — mesma responsabilidade de lib/currency.toCents", () => {
+describe("utils.toCents — unificado com lib/currency.toCents", () => {
+  // utils.ts tinha seu próprio toCents, divergente de lib/currency.toCents
+  // para valores com 2+ separadores de milhar. Unificado: agora @/utils
+  // reexporta a implementação de @/lib/currency, então devem ser a mesma
+  // função e produzir resultados idênticos em qualquer entrada.
+  it("é a mesma função (reexport), não uma cópia", () => {
+    expect(toCents).toBe(toCentsLib);
+  });
+
   it("converte '120,00' corretamente", () => {
     expect(toCents("120,00")).toBe(12000);
   });
 
-  // ⚠️ DIVERGÊNCIA ENCONTRADA ENTRE AS DUAS IMPLEMENTAÇÕES:
-  // lib/currency.ts usa replace(/\./g, "") (remove TODOS os pontos).
-  // utils.ts usa replace(".", "") (remove só o PRIMEIRO ponto).
-  // Isso quebra valores de milhão com 2 separadores de milhar (ex.: salário
-  // alto digitado como "1.234.567,89"), usado pelo IncomeForm via @/utils.
-  it("BUG: '1.234.567,89' (dois separadores de milhar) diverge entre lib/currency e utils", () => {
-    const viaLib = toCentsLib("1.234.567,89");
-    const viaUtils = toCents("1.234.567,89");
-
-    expect(viaLib).toBe(123456789); // implementação correta
-
-    // Documenta o valor ERRADO hoje produzido por utils.toCents.
-    // Se este teste começar a falhar, a divergência foi corrigida — ótimo!
-    // Quando isso acontecer, troque o expect abaixo por
-    // expect(viaUtils).toBe(123456789) e remova este comentário.
-    expect(viaUtils).not.toBe(123456789);
+  it("'1.234.567,89' (dois separadores de milhar) não diverge mais", () => {
+    expect(toCents("1.234.567,89")).toBe(123456789);
+    expect(toCents("1.234.567,89")).toBe(toCentsLib("1.234.567,89"));
   });
 });
 
